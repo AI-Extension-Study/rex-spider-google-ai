@@ -22,3 +22,7 @@ test('countText keeps punctuation inside a word', () => {
 test('countText counts letters outside ASCII as word characters', () => {
   assert.deepEqual(countText('\u00e9 \u65e5\u672c'), { chars: 4, words: 2 }); // e with acute, then two CJK ideographs
 });
+
+test('countText counts numbers that are not decimal digits as word characters', () => {
+  assert.deepEqual(countText('x\u00b2 \u00bd \u00b9'), { chars: 6, words: 3 }); // \u00bd and \u00b9 are numbers (\p{N}), not decimal digits
+});
