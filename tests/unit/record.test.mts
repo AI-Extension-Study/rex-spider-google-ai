@@ -157,6 +157,17 @@ test('list_numbers has exactly the ten keys whatever the entry\'s numbers hold',
   assert.deepEqual(record.metadata.list_numbers, { 3: 5, 11: null, 13: null, 17: null, 18: null, 23: null, 25: null, 26: null, 27: null, 30: null });
 });
 
+// The list already nulls these, so only an entry that skips the list shows
+// the record's own check.
+test('the record checks list numbers itself: out of range, fractional or text at one of the ten keys goes out as null', async () => {
+  const numbers = { ...listEntry().numbers, 3: 1000, 11: -1, 13: 1.5, 17: 'NUMBER-MARKER', 18: 0, 23: 999 } as unknown as Record<string, number | null>;
+  const entry: ListEntry = { ...listEntry(), numbers };
+  for (const record of [await summaryOf(entry), await detailOf(entry, thread(SMALL))]) {
+    assert.deepEqual(record.metadata.list_numbers, { 3: null, 11: null, 13: null, 17: null, 18: 0, 23: 999, 25: 0, 26: 0, 27: 2, 30: 0 });
+    assert.equal(JSON.stringify(record).includes('NUMBER-MARKER'), false);
+  }
+});
+
 test('the detail record of a list entry and its thread: every key and value', async () => {
   const record = await detailOf(listEntry(), thread(SMALL));
   assert.deepEqual(uploaded(record), {
@@ -205,6 +216,13 @@ test('turns_complete is the thread\'s complete when nothing is cut', async () =>
   assert.deepEqual([none.turns, none.turns_complete, none.metadata.turn_blocks], [[], false, 0]);
 });
 
+test('turns_complete is true only when the thread\'s complete is true itself, not missing or merely truthy', async () => {
+  for (const complete of [undefined, null, 1, 'true']) {
+    const record = await detailOf(listEntry(), { turns: SMALL, blocks: 2, complete: complete as unknown as boolean });
+    assert.equal(record.turns_complete, false, String(complete));
+  }
+});
+
 test('1,000 turns are all kept and leave the turns complete', async () => {
   const record = await detailOf(listEntry(), thread(numberedTurns(1000)));
   assert.equal(record.turns.length, 1000);
@@ -229,6 +247,21 @@ test('1,000 turns of the largest counts stay under 512 KB of JSON, so at the def
   assert.equal(record.turns_complete, true);
 });
 
+// Each of these turns is 232 characters of JSON, 233 with its comma, so 512
+// KB holds 2 + 233 * 2,250 - 1 = 524,251 characters of them and not 2,251.
+test('the default JSON cap is 512 KB: with the turn cap raised, 3,000 turns of the largest counts keep the newest 2,250', async () => {
+  const big = Number.MAX_SAFE_INTEGER;
+  const base = big - 3000;
+  const turns = Array.from({ length: 3000 }, (_, index) => assistantTurn(base + index, big, big));
+  assert.ok(turns.every((turn) => JSON.stringify(turn).length === 232), 'Test setup invalid: a turn is not 232 characters');
+  const record = await detailOf(listEntry(), thread(turns), { maxTurns: 5000 });
+  assert.equal(record.turns.length, 2250);
+  assert.deepEqual(record.turns.map((turn) => turn.text_chars), Array.from({ length: 2250 }, (_, index) => base + 750 + index));
+  assert.equal(JSON.stringify(record.turns).length, 524_251);
+  assert.ok(524_251 + 233 > TURNS_JSON_LIMIT);
+  assert.equal(record.turns_complete, false);
+});
+
 test('the JSON cap keeps the newest turns whose JSON fits and leaves the turns incomplete', async () => {
   const turns = numberedTurns(10);
   const fits = JSON.stringify(turns.slice(-4)).length;
@@ -244,6 +277,16 @@ test('the JSON cap keeps the newest turns whose JSON fits and leaves the turns i
   const whole = await detailOf(listEntry(), thread(turns), { turnsJsonLimit: JSON.stringify(turns).length });
   assert.equal(whole.turns.length, 10);
   assert.equal(whole.turns_complete, true);
+});
+
+// A turn that does not fit ends the cut, so the record never skips it and
+// keeps an older one, which would leave a gap in the turns.
+test('the JSON cap stops at the first turn that does not fit, and keeps no older turn past it', async () => {
+  const turns = [userTurn(1, 1), assistantTurn(123_456_789, 1, 0), userTurn(2, 1)];
+  const limit = JSON.stringify([userTurn(1, 1), userTurn(2, 1)]).length;
+  const record = await detailOf(listEntry(), thread(turns), { turnsJsonLimit: limit });
+  assert.deepEqual(record.turns.map((turn) => turn.text_chars), [2]);
+  assert.equal(record.turns_complete, false);
 });
 
 test('a newest turn alone over the JSON cap leaves no turns', async () => {
