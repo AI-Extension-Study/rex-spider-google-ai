@@ -77,6 +77,30 @@ test('folwrValues is null for a value with an entity, a space or a bracket in it
   assert.equal(folwrValues(threadPage({ ei: 'made up' })), null);
 });
 
+// The forms the capture recorded: garc, mlro, mlros and ei in id form, the
+// xsrf token id-form runs joined by single colons. The folwr URL's allow
+// pattern names exactly these forms (allowed.mts), so a value in any other
+// form fails the read as a layout change rather than make a request the
+// pattern does not name.
+test('folwrValues takes each value only in its captured form', () => {
+  for (const key of ['garc', 'mlro', 'mlros', 'ei'] as const) {
+    for (const bad of ['Made.up', 'Made/up', 'Made+up', 'Made=up', 'Made%2Eup', 'Made*up', 'Made:up', 'Madéup']) {
+      assert.equal(folwrValues(threadPage({ [key]: bad })), null, `${key} ${bad}`);
+    }
+  }
+  for (const bad of ['Made.up:1', 'Made/up:1', 'Made+up:1', ':MadeUp', 'MadeUp:', 'Made::up', 'Made%3Aup']) {
+    assert.equal(folwrValues(threadPage({ xsrf: bad })), null, `xsrf ${bad}`);
+  }
+  const edges = { garc: 'Az09_-', mlro: '-_zA90', mlros: 'a', ei: 'Z', xsrf: 'a_-0:Z9:x' };
+  assert.deepEqual(folwrValues(threadPage(edges)), edges);
+});
+
+test('folwrValues still reads the first value of each kind on the page, and does not pass over one in another form for a later one', () => {
+  const page = threadPage({ garc: 'Made.up' }).replace('</body>', '<div data-garc="LaterGarc0123"></div></body>');
+  assert.ok(page.includes('data-garc="LaterGarc0123"'), 'Test setup invalid: no second garc');
+  assert.equal(folwrValues(page), null);
+});
+
 test('folwrValues does not take the folif token for the folwr one', () => {
   const page = threadPage({ xsrf: null });
   assert.ok(page.includes('data-xsrf-folif-token="'), 'Test setup invalid: no folif token');

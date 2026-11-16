@@ -387,7 +387,7 @@ test('a list that fails on page 1 returns failed with no entries and the answer'
   const events: string[] = [];
   const failing = answer('', 503);
   const got = await walkList(fakeClient({ [listUrl(null)]: failing }, events), always, paced(events));
-  assert.deepEqual(got, { entries: [], outcome: 'failed', malformed: 0, answer: failing });
+  assert.deepEqual(got, { entries: [], outcome: 'failed', malformed: 0, answer: failing, stop: 'answer' });
 });
 
 // The status decides before the body: each of these answers carries a body
@@ -396,11 +396,11 @@ test('a non-ok answer ends the walk even when its body is a list page', async ()
   const events: string[] = [];
   const signedOut = answer(SIGNED_OUT, 401);
   let got = await walkList(fakeClient({ [listUrl(null)]: signedOut }, events), always, paced(events));
-  assert.deepEqual(got, { entries: [], outcome: 'failed', malformed: 0, answer: signedOut });
+  assert.deepEqual(got, { entries: [], outcome: 'failed', malformed: 0, answer: signedOut, stop: 'answer' });
 
   const sorry: Answer = { status: 200, url: 'https://www.google.com/sorry/index?continue=x', headers: {}, text: page(entries(0, 3)) };
   got = await walkList(fakeClient({ [listUrl(null)]: sorry }, events), always, paced(events));
-  assert.deepEqual(got, { entries: [], outcome: 'failed', malformed: 0, answer: sorry });
+  assert.deepEqual(got, { entries: [], outcome: 'failed', malformed: 0, answer: sorry, stop: 'answer' });
 
   const limited = answer(page(entries(20, 3)), 429, { 'retry-after': '60' });
   got = await walkList(fakeClient({ [listUrl(null)]: answer(page(entries(0, 20), CURSOR_1)), [listUrl(CURSOR_1)]: limited }, events), always, paced(events));
@@ -480,7 +480,7 @@ test('a /sorry/ answer on page 1 fails the walk and hands the answer back for th
 test('a request with no answer fails or cuts the walk, with no answer to hand back', async () => {
   const events: string[] = [];
   let got = await walkList(fakeClient({ [listUrl(null)]: new RequestError('timeout') }, events), always, paced(events));
-  assert.deepEqual(got, { entries: [], outcome: 'failed', malformed: 0, answer: null });
+  assert.deepEqual(got, { entries: [], outcome: 'failed', malformed: 0, answer: null, stop: 'timeout' });
   got = await walkList(fakeClient({ [listUrl(null)]: answer(page(entries(0, 20), CURSOR_1)), [listUrl(CURSOR_1)]: new RequestError('network') }, events), always, paced(events));
   assert.equal(got.outcome, 'partial');
   assert.equal(got.entries.length, 20);
@@ -491,7 +491,7 @@ test('a 200 page that does not parse fails the walk on page 1 and cuts it on pag
   const events: string[] = [];
   const html = answer('<html>a page where the list was expected</html>');
   let got = await walkList(fakeClient({ [listUrl(null)]: html }, events), always, paced(events));
-  assert.deepEqual(got, { entries: [], outcome: 'failed', malformed: 0, answer: html });
+  assert.deepEqual(got, { entries: [], outcome: 'failed', malformed: 0, answer: html, stop: 'unreadable' });
   got = await walkList(fakeClient({ [listUrl(null)]: answer(page(entries(0, 20), CURSOR_1)), [listUrl(CURSOR_1)]: html }, events), always, paced(events));
   assert.equal(got.outcome, 'partial');
   assert.equal(got.entries.length, 20);
@@ -548,8 +548,11 @@ test('a cursor handed out again cuts the walk as partial instead of looping', as
   assert.equal(events.filter((event) => event.startsWith('get')).length, 2);
 });
 
-test('a list still paging after the page limit is cut as partial', async () => {
-  assert.equal(MAX_PAGES, 1000);
+// 100 pages of 20 is 2,000 threads, about 50 minutes of walking at the 30 s
+// pace; 1,000 pages would let a server that keeps handing out cursors hold
+// the spider for over 8 hours.
+test('a list still paging after the page limit, 100 pages, is cut as partial', async () => {
+  assert.equal(MAX_PAGES, 100);
   const events: string[] = [];
   const cursor = (n: number) => `Cursor-${String(n).padStart(25, '0')}`;
   const pages: Record<string, Reply> = { [listUrl(null)]: answer(page(entries(0, 1), cursor(1))) };
@@ -558,10 +561,49 @@ test('a list still paging after the page limit is cut as partial', async () => {
   }
   const got = await walkList(fakeClient(pages, events), always, paced(events), { maxPages: 3 });
   assert.equal(got.outcome, 'partial');
+  assert.equal(got.stop, 'page-limit');
   assert.equal(got.answer, null);
   assert.equal(got.entries.length, 3);
   // No wait after the last request the cut allows.
   assert.deepEqual(events, [`get ${listUrl(null)}`, 'pace', `get ${listUrl(cursor(1))}`, 'pace', `get ${listUrl(cursor(2))}`]);
+});
+
+// The pass gives each its own reason: a refusal or a sign-out from the
+// answer, a session that ended mid-walk, a list that changed form, no
+// answer, or a cut.
+test('a walk that stops short says why in stop, on page 1 and after a cursor, and a whole walk has no stop', async () => {
+  const first = answer(page(entries(0, 20), CURSOR_1));
+  const cases: [string, Reply, string][] = [
+    ['a 500', answer('<html>error</html>', 500), 'answer'],
+    ['a 429', answer('', 429, { 'retry-after': '60' }), 'answer'],
+    ['a /sorry/ page', { status: 200, url: 'https://www.google.com/sorry/index?continue=x', headers: {}, text: '<html>' }, 'answer'],
+    ['a 401', answer(SIGNED_OUT, 401), 'answer'],
+    ['a page that does not parse', answer('<html>a page</html>'), 'unreadable'],
+    ['a timeout', new RequestError('timeout'), 'timeout'],
+    ['a dropped connection', new RequestError('network'), 'network'],
+    ['a rejection that is not a RequestError', new TypeError('broken'), 'network'],
+  ];
+  for (const [name, reply, stop] of cases) {
+    const onFirst = await walkList(fakeClient({ [listUrl(null)]: reply }, []), always, paced([]));
+    assert.deepEqual([onFirst.outcome, onFirst.stop], ['failed', stop], `${name} on page 1`);
+    const onSecond = await walkList(fakeClient({ [listUrl(null)]: first, [listUrl(CURSOR_1)]: reply }, []), always, paced([]));
+    assert.deepEqual([onSecond.outcome, onSecond.stop, onSecond.entries.length], ['partial', stop, 20], `${name} on page 2`);
+  }
+  for (const text of [SIGNED_OUT, body([[], null, 1]), body([])]) {
+    const got = await walkList(fakeClient({ [listUrl(null)]: first, [listUrl(CURSOR_1)]: answer(text) }, []), always, paced([]));
+    assert.deepEqual([got.outcome, got.stop], ['partial', 'no-list'], text);
+  }
+  const repeated = await walkList(fakeClient({ [listUrl(null)]: answer(page(entries(0, 1), CURSOR_1)), [listUrl(CURSOR_1)]: answer(page(entries(1, 1), CURSOR_1)) }, []), always, paced([]));
+  assert.deepEqual([repeated.outcome, repeated.stop], ['partial', 'repeated-cursor']);
+  const wholes = [
+    await walkList(fakeClient({ [listUrl(null)]: first, [listUrl(CURSOR_1)]: answer(LAST_EMPTY) }, []), always, paced([])),
+    await walkList(fakeClient({ [listUrl(null)]: first }, []), async () => false, paced([])),
+    await walkList(fakeClient({ [listUrl(null)]: answer(SIGNED_OUT) }, []), always, paced([])),
+  ];
+  for (const got of wholes) {
+    assert.equal(got.outcome, 'whole');
+    assert.equal('stop' in got, false);
+  }
 });
 
 test('a pace() or inWindow that rejects rejects the walk', async () => {

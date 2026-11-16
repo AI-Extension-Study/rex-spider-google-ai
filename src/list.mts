@@ -7,14 +7,15 @@
 import { DateString } from '@bric/rex-types/types';
 
 import type { Answer, Client } from './client.mts';
-import { classify } from './client.mts';
+import { RequestError, classify } from './client.mts';
 
 export const PAGE_SIZE = 20;
 
 // A list still handing out cursors after this many pages is cut, so a server
-// that never stops paging cannot hold a pass. 1,000 pages of 20 is 20,000
-// threads, far past any account seen.
-export const MAX_PAGES = 1000;
+// that never stops paging cannot hold a pass. 100 pages of 20 is 2,000
+// threads, about 50 minutes of walking at the 30 s pace; the largest account
+// seen had 62.
+export const MAX_PAGES = 100;
 
 // The positions that held small integers on every entry seen. Their meaning
 // is not settled, so they are kept as numbers for analysis; the set is fixed.
@@ -45,6 +46,14 @@ export interface ListPage {
 
 export type WalkOutcome = 'whole' | 'partial' | 'failed';
 
+// Why a walk stopped short of whole. answer: an answer classify does not call
+// ok (a refusal, a sign-out, another status), handed back in answer.
+// unreadable: a 2xx page that is not a list page, handed back too. no-list: a
+// page after a cursor with no entry list, as a session signed out mid-walk
+// answers. timeout and network: a request with no answer. repeated-cursor and
+// page-limit: the walk was cut.
+export type WalkStop = 'answer' | 'unreadable' | 'no-list' | 'timeout' | 'network' | 'repeated-cursor' | 'page-limit';
+
 export interface WalkResult {
   // Each thread once, as first seen, newest first.
   entries: ListEntry[];
@@ -62,6 +71,8 @@ export interface WalkResult {
   // Null for a whole walk, a request that got no answer, and a cut. Its text
   // can hold anything and its url names the cursor, so neither is ever logged.
   answer: Answer | null;
+  // Set exactly when the walk is not whole.
+  stop?: WalkStop;
 }
 
 export interface WalkOptions {
@@ -205,14 +216,14 @@ export async function walkList(client: Client, inWindow: (ms: number) => Promise
   const cursors = new Set<string>();
   let malformed = 0;
   let cursor: string | null = null;
-  const result = (outcome: WalkOutcome, answer: Answer | null = null): WalkResult => ({ entries, outcome, malformed, answer });
+  const whole = (): WalkResult => ({ entries, outcome: 'whole', malformed, answer: null });
   // A page that could not be read: the first leaves nothing, a later one
-  // leaves the pages before it.
-  const short = (pages: number, answer: Answer | null) => result(pages === 0 ? 'failed' : 'partial', answer);
+  // leaves the pages before it. A cut leaves the pages before it too.
+  const short = (pages: number, stop: WalkStop, answer: Answer | null = null): WalkResult => ({ entries, outcome: pages === 0 ? 'failed' : 'partial', malformed, answer, stop });
 
   for (let pages = 0; ; pages += 1) {
     if (pages >= maxPages) {
-      return result('partial');
+      return short(pages, 'page-limit');
     }
     if (pages > 0) {
       await pace();
@@ -220,22 +231,21 @@ export async function walkList(client: Client, inWindow: (ms: number) => Promise
     let answer: Answer;
     try {
       answer = await client.get(listUrl(cursor));
-    } catch {
-      // A RequestError carries only its kind, and the walk's outcome says the
-      // same.
-      return short(pages, null);
+    } catch (error) {
+      // A RequestError carries only its kind, and stop says the same.
+      return short(pages, error instanceof RequestError ? error.kind : 'network');
     }
     if (classify(answer) !== 'ok') {
-      return short(pages, answer);
+      return short(pages, 'answer', answer);
     }
     const page = readPage(answer.text);
     if (page === null) {
-      return short(pages, answer);
+      return short(pages, 'unreadable', answer);
     }
     // On the first page no list is an account with no threads. After a
     // cursor it is a session that ended mid-walk, not the end of the list.
     if (pages > 0 && page.noList) {
-      return short(pages, answer);
+      return short(pages, 'no-list', answer);
     }
     for (const item of page.items) {
       if (item === null) {
@@ -243,7 +253,7 @@ export async function walkList(client: Client, inWindow: (ms: number) => Promise
         continue;
       }
       if (!(await inWindow(item.updated.timestamp()))) {
-        return result('whole');
+        return whole();
       }
       // A thread updated between two requests moves to the top and shifts
       // the list down, so it can come again on a later page.
@@ -253,10 +263,10 @@ export async function walkList(client: Client, inWindow: (ms: number) => Promise
       }
     }
     if (page.cursor === null) {
-      return result('whole');
+      return whole();
     }
     if (cursors.has(page.cursor)) {
-      return result('partial');
+      return short(pages, 'repeated-cursor');
     }
     cursors.add(page.cursor);
     cursor = page.cursor;
