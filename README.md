@@ -34,7 +34,7 @@ The extension's spec is `github:bric-digital/rex-spider-google-ai#089c890cfae06d
 
 ## What is in this repo
 
-`src/service-worker.mts` is the crawler. `tests/specs/serviceworker-parsing.spec.ts` is bric-digital's Playwright spec; it only checks that the service worker loads, and nothing reads the sample list data in `tests/extension/data/` yet. `tests/specs/dependency-pins.spec.ts` checks that `package.json` names each REX module with no commit, so the extension's pin decides it, and that the lockfile holds the commits the extension ships. `npm run build`, `npm run lint` and `npm test`, which starts Chromium and a Python web server on port 8080. `.circleci/config.yml` is bric-digital's CircleCI setup; no CI runs on this fork.
+`src/service-worker.mts` is the crawler. `src/text.mts` is the shared counting rule (characters and words) the later records use; nothing calls it yet. `tests/specs/serviceworker-parsing.spec.ts` is bric-digital's Playwright spec; it only checks that the service worker loads, and nothing reads the sample list data in `tests/extension/data/` yet. `tests/specs/dependency-pins.spec.ts` checks that `package.json` names each REX module with no commit, so the extension's pin decides it, and that the lockfile holds the commits the extension ships. `npm run build`, `npm run lint` and `npm test`, which runs the unit tests in `tests/unit` with `node --test`, then the Playwright specs (these start Chromium and a Python web server on port 8080). GitHub Actions (`.github/workflows/ci.yml`, job `check`) runs the build, lint, the unit tests and the specs on pull requests and on `main`.
 
 ## Keeping this current
 
