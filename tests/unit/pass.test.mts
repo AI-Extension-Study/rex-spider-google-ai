@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import { sha256 } from '@bric/rex-core/common';
-import { DateString } from '@bric/rex-types/types';
+import type { DateString } from '@bric/rex-types/types';
 
 import type { BackoffState } from '../../src/backoff.mts';
 import { type Answer, RequestError } from '../../src/client.mts';
