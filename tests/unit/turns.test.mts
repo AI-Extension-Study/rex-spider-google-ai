@@ -367,6 +367,17 @@ test('an answer block inside which a turn block opens is not an answer', () => {
   assert.equal(thread.complete, false);
 });
 
+test('answer blocks nested tens of thousands deep, each holding a heading, are read in linear time', () => {
+  // Marking every open block at each heading takes about 4 s here.
+  const depth = 100_000;
+  const nested = `${'<div data-sn-op="2" data-target-container-id="1"><h2 class="iMqumd" data-rfsp="1">made-up</h2>'.repeat(depth)}${'</div>'.repeat(depth)}`;
+  const started = Date.now();
+  const thread = parseTurns(threadHtml([{ answer: [nested] }]));
+  assert.ok(Date.now() - started < 1000, `took ${Date.now() - started} ms`);
+  assert.deepEqual(thread.turns[1], assistant(null, null));
+  assert.equal(thread.complete, false);
+});
+
 test('an answer block inside which an h2[data-rfsp] opens is not an answer', () => {
   const thread = parse([{ answer: [...answerInners(1), paragraph('<h2 class="iMqumd" data-rfsp="1">You said: made-up</h2>')] }, {}]);
   assert.deepEqual(thread.turns[0], user(question(1)));

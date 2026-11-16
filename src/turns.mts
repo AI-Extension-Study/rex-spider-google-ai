@@ -232,7 +232,11 @@ interface Block {
   controls: boolean;
   // A turn block or a question heading opened inside it: the turn
   // structure is not where the rules expect it, so the answer is not read.
+  // Set at the block's close, when the count of those opens has moved since
+  // structureAtOpen; marking each open block as they open would cost the
+  // nesting depth at every heading.
   foreign: boolean;
+  readonly structureAtOpen: number;
 }
 
 interface Turn {
@@ -303,6 +307,8 @@ function walk(html: string): Scanned {
   const blocks = new Map<string, Block[]>();
   let heading: { turn: Turn; depth: number } | null = null;
   let headings = 0;
+  // Turn blocks and h2[data-rfsp] headings opened so far.
+  let structureOpens = 0;
 
   // Text inside the element at stack index depth is visible to it when no
   // skipped element is open at or below it.
@@ -334,6 +340,7 @@ function walk(html: string): Scanned {
       }
       if (element.block !== null) {
         openBlocks.pop();
+        element.block.foreign = structureOpens !== element.block.structureAtOpen;
         element.block.text = lines(element.block.parts.join(''));
         element.block.parts = [];
         if (element.block.target !== null) {
@@ -390,9 +397,7 @@ function walk(html: string): Scanned {
         turns.push(turn);
       }
       if (turn !== null || rfspHeading) {
-        for (const open of openBlocks) {
-          open.foreign = true;
-        }
+        structureOpens += 1;
       }
       let headingOf: Turn | null = null;
       if (rfspHeading) {
@@ -416,7 +421,7 @@ function walk(html: string): Scanned {
       }
       let block: Block | null = null;
       if (attrs.has('data-sn-op')) {
-        block = { target: read('data-target-container-id') ?? null, depth, parts: [], text: '', markers: 0, external: false, controls: false, foreign: false };
+        block = { target: read('data-target-container-id') ?? null, depth, parts: [], text: '', markers: 0, external: false, controls: false, foreign: false, structureAtOpen: structureOpens };
         openBlocks.push(block);
       }
       if (turn !== null) {
