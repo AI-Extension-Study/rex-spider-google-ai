@@ -223,15 +223,29 @@ test('the update itself: a browser with only the old spider\'s keys, served eith
   }
 });
 
-test('a key lookup that fails fails dueState, so the caller never reads it as never sent', async () => {
+test('a key lookup that fails fails dueState, whichever key it was, so the caller never reads it as never sent', async () => {
   const failing: Transmitted = async () => {
     throw new Error('lookup deadline');
   };
-  await assert.rejects(dueState(failing, entry(SWITCH - DAY), 'detail', SWITCH), /lookup deadline/);
-  // A lookup that fails only for the legacy key fails too.
-  const legacyFails: Transmitted = async (id) => {
-    if (id === LEGACY) throw new Error('legacy lookup deadline');
-    return false;
-  };
-  await assert.rejects(dueState(legacyFails, entry(SWITCH - DAY), 'detail', SWITCH), /legacy lookup deadline/);
+  for (const served of ['detail', 'summary'] as const) {
+    await assert.rejects(dueState(failing, entry(SWITCH - DAY), served, SWITCH), /lookup deadline/, `${served}, every lookup fails`);
+    // Only one lookup fails and the other two answer never sent, so a
+    // failure read as never sent would make the thread due. Under the served
+    // mode it would be sent again; under the other mode or the legacy key a
+    // thread from more than 90 days before the switch would lose its hold.
+    const ids: [string, string][] = [
+      ['served-mode', served === 'detail' ? DETAIL : SUMMARY],
+      ['other-mode', served === 'detail' ? SUMMARY : DETAIL],
+      ['legacy', LEGACY],
+    ];
+    for (const [which, failingId] of ids) {
+      const onlyOneFails: Transmitted = async (id) => {
+        if (id === failingId) throw new Error(`${which} lookup deadline`);
+        return false;
+      };
+      for (const ended of [SWITCH - DAY, SWITCH - 100 * DAY]) {
+        await assert.rejects(dueState(onlyOneFails, entry(ended), served, SWITCH), { message: `${which} lookup deadline` }, `${served}, only the ${which} lookup fails, ${(SWITCH - ended) / DAY} days before`);
+      }
+    }
+  }
 });
