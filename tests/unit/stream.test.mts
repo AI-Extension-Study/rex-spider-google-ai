@@ -167,3 +167,112 @@ test('a placeholder that appears twice is filled once', () => {
 test('an HTML chunk that does not start with a tag is kept', () => {
   assert.equal(whole(simpleStream(['<p>Start ', 'middle text ', 'end</p>'])), '<div><div><p>Start middle text end</p></div></div>');
 });
+
+// ---- fix round 1: the walk's edges ----
+
+const TWO_FILLS = [{ n: 1, chunks: ['<p>Text.</p>'] }, { n: 8, chunks: [''] }];
+
+test('a body cut anywhere inside its last chunk gives null, and cut at that chunk\'s start is not whole', () => {
+  const chunks = streamChunks([ROOT], TWO_FILLS);
+  const body = streamBody(chunks);
+  const last = chunks[chunks.length - 1];
+  const start = body.length - (last.length.toString(16).length + 1 + last.length);
+  assert.equal(body.slice(start), `${last.length.toString(16)};${last}`, 'Test setup invalid: the last chunk is not where expected');
+  for (let cut = start + 1; cut < body.length; cut += 1) {
+    assert.equal(unchunk(body.slice(0, cut)), null, `a cut ${body.length - cut} unit(s) before the end was read`);
+  }
+  assert.equal(unchunk(body.slice(0, start))?.whole, false);
+  assert.equal(unchunk(body)?.whole, true);
+});
+
+test('a guard without its newline gives null, whatever follows it', () => {
+  const rest = simpleStream(['<p>Text.</p>']).slice(")]}'\n".length);
+  assert.equal(unchunk(`)]}'x${rest}`), null);
+  assert.equal(unchunk(`)]}' ${rest}`), null);
+  assert.equal(unchunk(`)]}'\n${rest}`)?.whole, true);
+});
+
+test('a length with a character that is not a hex digit gives null', () => {
+  const rest = simpleStream(['<p>Text.</p>']).slice(")]}'\n".length);
+  for (const character of ['g', 'G', 'x', ' ', '-', '+', '.']) {
+    assert.equal(unchunk(`)]}'\n${character}${rest}`), null, `a length starting ${JSON.stringify(character)} was read`);
+  }
+  // A non-hex digit last: read as -1, "1g" would be 15, this payload's
+  // length, and the stream would read whole.
+  const payload = '<p>Made up.</p>';
+  assert.equal(payload.length, 15);
+  const chunks = streamChunks([ROOT], [{ n: 1, chunks: [payload] }, { n: 8, chunks: [''] }]);
+  assert.equal(unchunk(streamBody(chunks))?.whole, true);
+  const body = `)]}'\n${chunks.map((chunk) => `${chunk === payload ? '1g' : chunk.length.toString(16)};${chunk}`).join('')}`;
+  assert.equal(unchunk(body), null);
+});
+
+test('a semicolon with no length before it gives null', () => {
+  const body = simpleStream(['<p>Text.</p>']);
+  assert.equal(unchunk(`${body};`), null);
+  assert.equal(unchunk(`)]}'\n;${body.slice(")]}'\n".length)}`), null);
+});
+
+test('a length of up to 8 hex digits is read, leading zeros included, and one of 9 gives null', () => {
+  const chunks = streamChunks([ROOT], TWO_FILLS);
+  const padded = (width: number) => `)]}'\n${chunks.map((payload) => `${payload.length.toString(16).padStart(width, '0')};${payload}`).join('')}`;
+  assert.deepEqual(unchunk(padded(8)), unchunk(streamBody(chunks)));
+  assert.equal(unchunk(padded(8))?.whole, true);
+  assert.equal(unchunk(padded(9)), null);
+});
+
+test('hex lengths are read in either case', () => {
+  const chunks = streamChunks([ROOT], TWO_FILLS);
+  const upper = `)]}'\n${chunks.map((payload) => `${payload.length.toString(16).toUpperCase()};${payload}`).join('')}`;
+  assert.notEqual(upper, streamBody(chunks), 'Test setup invalid: no length holds a letter');
+  assert.deepEqual(unchunk(upper), unchunk(streamBody(chunks)));
+  assert.equal(unchunk(upper)?.whole, true);
+});
+
+test('a fill cut before its marker adds no HTML', () => {
+  const root = `<div>${placeholder(1)}${placeholder(2)}</div>`;
+  const chunks = streamChunks([root], [{ n: 1, chunks: ['<p>Kept text.</p>'] }, { n: 2, chunks: ['<p>Partial ', 'text.</p>'] }]);
+  const first = chunks.indexOf('<p>Partial ');
+  // After the fill's first chunk, after its second, and after its end frame.
+  for (const cut of [first + 1, first + 2, first + 3]) {
+    const result = unchunk(streamBody(chunks.slice(0, cut)));
+    assert.ok(result !== null, `the walk failed at cut ${cut}`);
+    assert.equal(result.whole, false);
+    assert.ok(result.html.includes('Kept text.'));
+    assert.equal(result.html.includes('Partial'), false, `cut ${cut} kept the partial fill`);
+  }
+});
+
+test('after the root\'s end frame only an empty chunk or a marker may come', () => {
+  const chunks = streamChunks([ROOT], TWO_FILLS);
+  const markerAt = chunks.indexOf(END_FRAME) + 1;
+  assert.equal(chunks[markerAt], '', 'Test setup invalid: the root\'s marker is not empty');
+  const replaced = (payload: string) => streamBody(chunks.map((chunk, index) => (index === markerAt ? payload : chunk)));
+  assert.equal(unchunk(replaced(fillMarker(99)))?.whole, true);
+  for (const payload of ['<p>stray</p>', 'text', DATA_FRAME, HEADER_FRAME, fillFrame(1)]) {
+    assert.equal(unchunk(replaced(payload))?.whole, false, `${payload} after the root was accepted`);
+  }
+});
+
+test('a fill\'s text that reads like a frame is text', () => {
+  for (const text of ['[9,null,"1"]', '[9]', '[9, null, "0"]', '[6,"x","0"]']) {
+    const result = unchunk(simpleStream(['<p>', text, '</p>']));
+    assert.ok(result !== null);
+    assert.equal(result.whole, true, `${text} ended or broke the fill`);
+    assert.equal(result.html, `<div><div><p>${text}</p></div></div>`);
+  }
+});
+
+test('root text that reads like a frame is root HTML', () => {
+  const result = unchunk(streamBody(streamChunks(['<div>', '[1]', `${placeholder(1)}${placeholder(8)}</div>`], [{ n: 1, chunks: ['<p>x</p>'] }, { n: 8, chunks: [''] }])));
+  assert.deepEqual(result, { html: '<div>[1]<p>x</p></div>', whole: true });
+});
+
+test('between fills, anything but a fill frame or a data frame in its exact form is stray', () => {
+  const chunks = streamChunks([ROOT], TWO_FILLS);
+  const at = chunks.indexOf(fillFrame(8));
+  for (const near of ['[7,null,"0"]', '[2,null,"0"]', HEADER_FRAME, '[6, "_x_1", "0"]']) {
+    const changed = [...chunks.slice(0, at), near, ...chunks.slice(at)];
+    assert.equal(unchunk(streamBody(changed))?.whole, false, `${near} between fills was accepted`);
+  }
+});

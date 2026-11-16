@@ -124,7 +124,7 @@ for (const key of Object.keys(FOLWR_VALUES) as (keyof FolwrValues)[]) {
   test(`a thread page without ${key} is a layout failure, after one request and no pace()`, async () => {
     const page = answer(200, threadPage({ [key]: null } as PageValues));
     const { result, events } = await read([page]);
-    assert.deepEqual(result, { ok: false, failure: 'layout', answer: page });
+    assert.deepEqual(result, { ok: false, failure: 'layout', answer: null });
     assert.deepEqual(events, [`get ${PAGE_URL}`]);
   });
 }
@@ -140,7 +140,7 @@ for (const [name, text] of BROKEN) {
   test(`${name} from folwr is a stream failure`, async () => {
     const stream = answer(200, text);
     const { result, events } = await read([PAGE, stream]);
-    assert.deepEqual(result, { ok: false, failure: 'stream', answer: stream });
+    assert.deepEqual(result, { ok: false, failure: 'stream', answer: null });
     assert.equal(events.length, 3);
   });
 }
@@ -148,9 +148,9 @@ for (const [name, text] of BROKEN) {
 test('a folwr body over the cap is too large, and one at the cap is read as a stream', async () => {
   const over = answer(200, `)]}'\n${'x'.repeat(FOLWR_TEXT_CAP)}`);
   assert.ok(over.text.length > FOLWR_TEXT_CAP);
-  assert.deepEqual((await read([PAGE, over])).result, { ok: false, failure: 'too-large', answer: over });
+  assert.deepEqual((await read([PAGE, over])).result, { ok: false, failure: 'too-large', answer: null });
   const at = answer(200, over.text.slice(0, FOLWR_TEXT_CAP));
-  assert.deepEqual((await read([PAGE, at])).result, { ok: false, failure: 'stream', answer: at });
+  assert.deepEqual((await read([PAGE, at])).result, { ok: false, failure: 'stream', answer: null });
 });
 
 const SORRY = 'https://www.google.com/sorry/index?continue=made-up';

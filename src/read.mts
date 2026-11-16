@@ -1,9 +1,8 @@
 // Reading one thread with two requests: the thread page, which holds the
 // five values the folwr request needs, then folwr, whose answer holds every
-// turn. pace() is awaited between them. A read that fails says why, and
-// hands back the answer that ended it so the pass can sort it (a wait's
-// Retry-After, a challenge); nothing is logged, since the URLs name the
-// thread and the bodies hold its questions and answers.
+// turn. pace() is awaited between them. A read that fails says why;
+// nothing is logged, since the URLs name the thread and the bodies hold its
+// questions and answers.
 import type { Answer, Classification, Client } from './client.mts';
 import { classify } from './client.mts';
 import type { ListEntry } from './list.mts';
@@ -25,6 +24,12 @@ export interface FolwrValues {
 // rest are the answer's classification.
 export type ReadFailure = 'layout' | 'stream' | 'too-large' | Exclude<Classification, 'ok'> | 'network';
 
+// A failure's answer is the one whose classification ended the read, so the
+// pass can read its status and Retry-After. It is null for layout, stream
+// and too-large, which need neither, so a page or a folwr body (up to 40 Mi
+// units of the thread's text) and the URL with its tokens go no further than
+// here; and null for network, which got no answer. Its text and url are
+// never logged.
 export type ReadResult = { ok: true; thread: ParsedThread } | { ok: false; failure: ReadFailure; answer: Answer | null };
 
 // mstk and mtid are in id form (list.mts), so encoding changes nothing; it
@@ -90,7 +95,7 @@ export async function readThread(client: Client, entry: ListEntry, pace: () => P
   }
   const values = folwrValues(page.text);
   if (values === null) {
-    return failed('layout', page);
+    return failed('layout', null);
   }
   await pace();
   const stream = await get(client, folwrUrl(values));
@@ -103,11 +108,11 @@ export async function readThread(client: Client, entry: ListEntry, pace: () => P
   }
   // Checked before unchunk, which refuses it too, so the failure says why.
   if (stream.text.length > FOLWR_TEXT_CAP) {
-    return failed('too-large', stream);
+    return failed('too-large', null);
   }
   const unchunked = unchunk(stream.text);
   if (unchunked === null) {
-    return failed('stream', stream);
+    return failed('stream', null);
   }
   const thread = parseTurns(unchunked.html);
   return { ok: true, thread: { ...thread, complete: thread.complete && unchunked.whole } };

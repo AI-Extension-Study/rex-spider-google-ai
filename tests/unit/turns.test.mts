@@ -5,7 +5,7 @@ import type { AimTurn, ParsedThread } from '../../src/record.mts';
 import { unchunk } from '../../src/stream.mts';
 import { countText } from '../../src/text.mts';
 import { parseTurns } from '../../src/turns.mts';
-import { ANSWER_CITATIONS, LABEL, type TurnSpec, answerText, citation, collapsedCitation, controlsInner, opBlock, paragraph, question, threadHtml, threadStream } from './thread-fixtures.mts';
+import { ANSWER_CITATIONS, LABEL, type TurnSpec, answerInners, answerText, citation, collapsedCitation, controlsInner, opBlock, paragraph, question, threadHtml, threadStream } from './thread-fixtures.mts';
 
 const TURN_KEYS = ['identifier', 'parent', 'speaker', 'when', 'on_current_branch', 'text_chars', 'text_words', 'citation_count', 'search_result_count', 'attachments'];
 
@@ -243,7 +243,6 @@ const HREFS: [string, boolean][] = [
   ['HTTPS://EXAMPLE.NET/upper', true],
   ['https://notgoogle.com/x', true],
   ['https://google.com.example.net/x', true],
-  ['https://gstatic.com/x', true],
   ['https://exa mple.net/unreadable', true],
   ['https://www.google.com/search?q=made-up&amp;kgmid=/m/0', false],
   ['https://google.com/maps', false],
@@ -252,6 +251,12 @@ const HREFS: [string, boolean][] = [
   ['https://www.google.co.uk/x', false],
   ['https://www.google.com.au/x', false],
   ['https://fonts.gstatic.com/x', false],
+  ['https://gstatic.com/x', false],
+  ['https://googleusercontent.com/x', false],
+  ['https://googleapis.com/x', false],
+  ['https://www.google.com./x', false],
+  ['https://example.net./x', true],
+  ['https://notgstatic.com/x', true],
   ['https://lh3.googleusercontent.com/x', false],
   ['https://www.googleapis.com/x', false],
   ['/search?q=made-up', false],
@@ -304,4 +309,68 @@ test('markers planted in every attribute, script, style and comment change no co
 test('the answer of a turn whose blocks come before its turn block is still found', () => {
   const html = threadHtml([{ answer: [], controls: 0 }]).replace('<div class="CKgc1d"', `${opBlock('106', paragraph('Early answer.'))}${opBlock('106', controlsInner())}<div class="CKgc1d"`);
   assert.deepEqual(parseTurns(html).turns[1], assistant('Early answer.', 0));
+});
+
+// ---- fix round 1: the parser's edges ----
+
+test('an h2 without data-rfsp is neither the question nor a heading that counts', () => {
+  const thread = parse([{ answer: [paragraph('Before.'), '<h2 class="made-up">A plain heading</h2>', paragraph('After.')] }]);
+  assert.deepEqual(thread.turns[1], assistant('Before.\nA plain heading\nAfter.', 0));
+  assert.equal(thread.complete, true);
+  const html = threadHtml([{}]).replace('<h2 class="iMqumd" data-rfsp="1">', '<h2 class="made-up">Not this: one</h2><h2 class="iMqumd" data-rfsp="1">');
+  assert.deepEqual(parseTurns(html).turns[0], user(question(1)));
+});
+
+test('attribute values are decoded where the rules read them', () => {
+  assert.equal(answerOf([paragraph('Link <a href="https&#58;//example.net/x">here</a>.')]).citation_count, null);
+  assert.deepEqual(answerOf([paragraph('Cited.<span data-suuid="nCd0md&#124;made-up-|">wrapped</span>')]), assistant('Cited.', 1));
+  assert.deepEqual(answerOf([paragraph('Shown <span style="display&#58;none">gone</span>text.')]), assistant('Shown text.', 0));
+  const html = threadHtml([{}]).replace('data-scope-id="turn"', 'data-scope-id="t&#117;rn"').replace('data-container-id="main-col"', 'data-container-id="main&#45;col"');
+  assert.deepEqual(parseTurns(html).turns, defaultTurns(1));
+});
+
+test('only a block whose child carries Gd7Hsc is the controls block, not one with it deeper', () => {
+  const deep = '<div class="made-up"><div class="made-up"><div data-xid="Gd7Hsc">Deep made-up text</div></div></div>';
+  assert.deepEqual(answerOf([paragraph('Answer.'), deep]), assistant('Answer.\nDeep made-up text', 0));
+});
+
+test('the answer\'s container is the first one under main-col, not a later one', () => {
+  const html = threadHtml([{}]).replace('<div class="alk4p q4PqPb">', '<div style="display:contents" data-container-id="999"></div><div class="alk4p q4PqPb">');
+  assert.ok(html.includes('data-container-id="999"'), 'Test setup invalid: no second container');
+  assert.deepEqual(parseTurns(html).turns[1], assistant(answerText(1), ANSWER_CITATIONS));
+});
+
+test('the search for the answer\'s container ends where main-col does', () => {
+  // main-col emptied, and the answer aimed at the scaffold container after it.
+  const html = threadHtml([{}]).replace('<div style="display:contents" data-container-id="106"></div>', '').replaceAll('data-target-container-id="106"', 'data-target-container-id="109"');
+  assert.ok(html.includes('data-container-id="109"') && !html.includes('"106"'), 'Test setup invalid');
+  const thread = parseTurns(html);
+  assert.deepEqual(thread.turns[1], assistant(null, null));
+  assert.equal(thread.complete, false);
+});
+
+test('only a span whose data-suuid starts with nCd0md| is a citation marker', () => {
+  const near = [
+    '<span data-suuid="nCd0mdX|made-up-|">one</span>',
+    '<span data-suuid="other|made-up-|">two</span>',
+    '<span data-suuid="x nCd0md|made-up-|">three</span>',
+    '<span data-suuid="nCd0md">four</span>',
+  ];
+  const turn = answerOf([paragraph(`Start ${near.join(' ')}.`), '<div data-suuid="nCd0md|made-up-|">five</div>']);
+  assert.deepEqual(turn, assistant('Start one two three four.\nfive', 0));
+});
+
+test('an answer block inside which a turn block opens is not an answer', () => {
+  const thread = parse([{ answer: [...answerInners(1), '<div class="CKgc1d" data-scope-id="turn"><div>made-up</div></div>'] }]);
+  assert.deepEqual(thread.turns[0], user(question(1)));
+  assert.deepEqual(thread.turns[1], assistant(null, null));
+  assert.equal(thread.complete, false);
+});
+
+test('an answer block inside which an h2[data-rfsp] opens is not an answer', () => {
+  const thread = parse([{ answer: [...answerInners(1), paragraph('<h2 class="iMqumd" data-rfsp="1">You said: made-up</h2>')] }, {}]);
+  assert.deepEqual(thread.turns[0], user(question(1)));
+  assert.deepEqual(thread.turns[1], assistant(null, null));
+  assert.deepEqual(thread.turns.slice(2), defaultTurns(2).slice(2));
+  assert.equal(thread.complete, false);
 });

@@ -2,7 +2,9 @@
 // written as <hex length>;<payload>, each length in UTF-16 units (JavaScript
 // string length; a UTF-8 or code point reading breaks on the first emoji).
 // The payloads are JSON frames, a root of HTML, and fills: [6,"<id>","0"],
-// the fill's HTML chunks, [9,null,"0"] and a marker chunk. Each fill replaces
+// the fill's HTML chunks, [9,null,"0"] and a marker chunk. Frames are known
+// by their exact strings, as every capture wrote them, so HTML or text that
+// happens to parse as JSON is never taken for one. Each fill replaces
 // the <span data-async-ph="<id>"></span> it names, in the root or in another
 // fill, as the page's script does.
 //
@@ -28,6 +30,14 @@ const MAX_LENGTH_DIGITS = 8;
 const MARKER = /^[A-Za-z0-9_-]+_stc[a-z]_(?:[A-Za-z]+_)?\d+$/;
 
 const PLACEHOLDER = /<span data-async-ph="([^"]*)"><\/span>/g;
+
+// The frames, exactly as captured. The header is ["<ei>","<digits>",null,
+// [<digits>,...]].
+const HEADER_FRAME = /^\["[A-Za-z0-9_-]*","[0-9]*",null,\[[0-9,]*\]\]$/;
+const ROOT_FRAME = '[2,null,"0"]';
+const END_FRAME = '[9,null,"0"]';
+const DATA_FRAME = '[8,null,"0"]';
+const FILL_FRAME = /^\[6,"([^"\\]*)","0"\]$/;
 
 function hexDigit(code: number): number {
   if (code >= 0x30 && code <= 0x39) {
@@ -71,32 +81,20 @@ function chunksOf(body: string): string[] | null {
   return chunks;
 }
 
-// A JSON frame, or null for a chunk that is not a JSON array (HTML, a marker,
-// or text).
-function frameOf(chunk: string): unknown[] | null {
-  if (chunk.charCodeAt(0) !== 0x5b) {
-    return null;
-  }
-  try {
-    const value: unknown = JSON.parse(chunk);
-    return Array.isArray(value) ? value : null;
-  } catch {
-    return null;
-  }
-}
-
 interface Sorted {
   root: string;
   fills: Map<string, string>;
-  // Chunks where only a fill or a data frame may come, and markers that are
-  // not in the marker form.
+  // Chunks where only a fill or a data frame may come, markers that are not
+  // in the marker form, and anything but an empty chunk or a marker after
+  // the root's end frame.
   stray: number;
   endsOnMarker: boolean;
 }
 
 // Sorts the payloads into the root and the fills. The root is the HTML before
-// its [9,null,"0"]; its marker chunk (empty in every capture) is skipped. A
-// fill counts once its marker arrives; a fill cut before that is dropped.
+// its [9,null,"0"], less the header and [2,null,"0"]; the chunk after it is
+// its marker, empty in every capture. A fill counts once its marker arrives;
+// a fill cut before that is dropped.
 function sort(chunks: readonly string[]): Sorted {
   const root: string[] = [];
   const fills = new Map<string, string>();
@@ -107,35 +105,39 @@ function sort(chunks: readonly string[]): Sorted {
   let endsOnMarker = false;
   for (const chunk of chunks) {
     endsOnMarker = false;
-    const frame = frameOf(chunk);
     switch (state) {
       case 'root':
         // The header frame and [2,null,"0"] carry no HTML.
-        if (frame === null) {
-          root.push(chunk);
-        } else if (frame[0] === 9) {
+        if (chunk === END_FRAME) {
           state = 'root-marker';
+        } else if (chunk !== ROOT_FRAME && !HEADER_FRAME.test(chunk)) {
+          root.push(chunk);
         }
         break;
       case 'root-marker':
+        if (chunk !== '' && !MARKER.test(chunk)) {
+          stray += 1;
+        }
         state = 'between';
         break;
-      case 'between':
-        if (frame !== null && frame[0] === 6 && typeof frame[1] === 'string') {
-          id = frame[1];
+      case 'between': {
+        const fill = FILL_FRAME.exec(chunk);
+        if (fill !== null) {
+          id = fill[1];
           parts = [];
           state = 'fill';
-        } else if (frame !== null && frame[0] === 8) {
+        } else if (chunk === DATA_FRAME) {
           state = 'data';
-        } else if (frame === null) {
+        } else {
           stray += 1;
         }
         break;
+      }
       case 'data':
         state = 'between';
         break;
       case 'fill':
-        if (frame !== null && frame[0] === 9) {
+        if (chunk === END_FRAME) {
           state = 'fill-marker';
         } else {
           parts.push(chunk);

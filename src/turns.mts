@@ -197,9 +197,10 @@ function scan(html: string, on: Visitor): void {
 // ---- links ----
 
 // google.com and its subdomains; google.<country> (google.de, google.co.uk,
-// google.com.au) and theirs; subdomains of Google's content hosts.
+// google.com.au) and theirs; Google's content hosts (gstatic.com,
+// googleusercontent.com, googleapis.com) and their subdomains.
 const GOOGLE = /^(?:[a-z0-9-]+\.)*google\.(?:com|(?:com?\.)?[a-z]{2})$/;
-const GOOGLE_CONTENT = /^(?:[a-z0-9-]+\.)+(?:gstatic|googleusercontent|googleapis)\.com$/;
+const GOOGLE_CONTENT = /^(?:[a-z0-9-]+\.)*(?:gstatic|googleusercontent|googleapis)\.com$/;
 
 // An http or https URL to a host that is not Google's. A relative link
 // resolves against the page, www.google.com. A link that cannot be read is
@@ -229,6 +230,9 @@ interface Block {
   markers: number;
   external: boolean;
   controls: boolean;
+  // A turn block or a question heading opened inside it: the turn
+  // structure is not where the rules expect it, so the answer is not read.
+  foreign: boolean;
 }
 
 interface Turn {
@@ -380,12 +384,18 @@ function walk(html: string): Scanned {
 
       const turnHere = openTurns[openTurns.length - 1];
       let turn: Turn | null = null;
+      const rfspHeading = name === 'h2' && attrs.has('data-rfsp');
       if (read('data-scope-id') === 'turn') {
         turn = { heading: null, main: null, mainState: 'before' };
         turns.push(turn);
       }
+      if (turn !== null || rfspHeading) {
+        for (const open of openBlocks) {
+          open.foreign = true;
+        }
+      }
       let headingOf: Turn | null = null;
-      if (name === 'h2' && attrs.has('data-rfsp')) {
+      if (rfspHeading) {
         headings += 1;
         if (turnHere !== undefined && turnHere.heading === null && heading === null) {
           turnHere.heading = [];
@@ -406,7 +416,7 @@ function walk(html: string): Scanned {
       }
       let block: Block | null = null;
       if (attrs.has('data-sn-op')) {
-        block = { target: read('data-target-container-id') ?? null, depth, parts: [], text: '', markers: 0, external: false, controls: false };
+        block = { target: read('data-target-container-id') ?? null, depth, parts: [], text: '', markers: 0, external: false, controls: false, foreign: false };
         openBlocks.push(block);
       }
       if (turn !== null) {
@@ -462,8 +472,9 @@ function questionOf(turn: Turn): Counts | null {
 
 // The answer body: the blocks aimed at the turn's numeric container, minus
 // the one controls block. Not found (null) when the turn has no numeric id,
-// shares its id with another turn, has not exactly one controls block, or
-// has no other block. Its text is the blocks' visible texts, one line break
+// shares its id with another turn, has not exactly one controls block, has
+// no other block, or has a block with a turn block or an h2[data-rfsp]
+// inside it. Its text is the blocks' visible texts, one line break
 // between them.
 function answerOf(turn: Turn, scanned: Scanned, uses: ReadonlyMap<string, number>): { counts: Counts; citations: number | null } | null {
   if (turn.main === null || !NUMERIC_ID.test(turn.main) || uses.get(turn.main) !== 1) {
@@ -471,7 +482,7 @@ function answerOf(turn: Turn, scanned: Scanned, uses: ReadonlyMap<string, number
   }
   const all = scanned.blocks.get(turn.main) ?? [];
   const body = all.filter((block) => !block.controls);
-  if (all.length - body.length !== 1 || body.length === 0) {
+  if (all.length - body.length !== 1 || body.length === 0 || all.some((block) => block.foreign)) {
     return null;
   }
   const text = body.map((block) => block.text).filter((part) => part !== '').join('\n');
