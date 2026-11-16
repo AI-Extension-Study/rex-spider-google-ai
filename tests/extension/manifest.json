@@ -6,6 +6,8 @@
   "permissions": [
     "alarms",
     "cookies",
+    "declarativeNetRequest",
+    "declarativeNetRequestFeedback",
     "scripting",
     "storage",
     "nativeMessaging"
