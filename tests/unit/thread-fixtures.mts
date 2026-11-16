@@ -212,3 +212,37 @@ export function threadStream(turns: readonly TurnSpec[]): string {
   const root = `${ROOT_OPEN}${pieces.length > 0 ? placeholder(10) : ''}</div>${placeholder(8)}</div>`;
   return streamBody(streamChunks([root], [...fills, { n: 8, chunks: [''] }]));
 }
+
+// ---- the thread page ----
+
+// The five values the folwr request needs, made up in the captured forms:
+// garc alphanumeric, the lro token in id form, its signature alphanumeric,
+// the xsrf token with a colon, and the ei.
+export const FOLWR_VALUES = {
+  garc: 'GarcValue0123456789abcdefGHIJKLmnopqrstUVWXYZ0123456789abcdefGHIJKLmnopqrstUVWXYZ012345',
+  mlro: 'Mlro-Token_0123456789abcdefGHIJKLmnopqrstUVWXYZ-0123456789_abcdefGHIJKLmnopqrstUVWXYZ',
+  mlros: 'Sig0123abcd',
+  xsrf: 'AFakeXsrfToken0123456789abcdefGHIJ:1763300000000',
+  ei: EI,
+} as const;
+
+export interface PageValues {
+  readonly garc?: string | null;
+  readonly mlro?: string | null;
+  readonly mlros?: string | null;
+  readonly xsrf?: string | null;
+  readonly ei?: string | null;
+}
+
+// A thread page: the values on one div, as captured, with the folif token
+// beside the folwr one, and the ei in a script. A value given as null is
+// left out.
+export function threadPage(values: PageValues = {}): string {
+  const v = { ...FOLWR_VALUES, ...values };
+  const attr = (name: string, value: string | null) => (value === null ? '' : ` ${name}="${value}"`);
+  return '<!doctype html><html lang="en"><head><title>Made-up - Google Search</title>'
+    + `<script nonce="made-up">(function(){window.google={${v.ei === null ? '' : `kEI:'${v.ei}',`}kEXPI:'0,made-up',u:'made-up'};})();</script></head>`
+    + '<body><div class="made-up">'
+    + `<div data-ei="${EI}"${attr('data-garc', v.garc)}${attr('data-lro-signature', v.mlros)}${attr('data-lro-token', v.mlro)} data-srtst="made-up-srtst" data-xsrf-folif-token="FolifToken-made-up:1763300000000"${attr('data-xsrf-folwr-token', v.xsrf)}></div>`
+    + '<a href="https://accounts.google.com/SignOutOptions?made-up">Made-up account</a></div></body></html>';
+}
