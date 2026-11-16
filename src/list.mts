@@ -51,15 +51,16 @@ export interface WalkResult {
   // whole: read to the last page, or to the first entry outside the window.
   // failed: the first page could not be read; entries is empty, which is then
   // not an empty account. partial: a later page could not be read, or the
-  // walk was cut (a cursor handed out twice, or MAX_PAGES); entries holds the
-  // pages before it.
+  // walk was cut (a cursor handed out twice, or MAX_PAGES), or a page after a
+  // cursor came back with no entry list, as a session signed out mid-walk
+  // answers; entries holds the pages before it.
   outcome: WalkOutcome;
   // Entries skipped as unreadable, up to where the walk stopped.
   malformed: number;
   // The answer that ended a walk short of whole, for the pass to classify
   // (rate-limited, challenge and signed-out each call for their own stop).
   // Null for a whole walk, a request that got no answer, and a cut. Its text
-  // can hold anything, so it is never logged.
+  // can hold anything and its url names the cursor, so neither is ever logged.
   answer: Answer | null;
 }
 
@@ -149,8 +150,11 @@ function readCursor(value: unknown): string | null | undefined {
 }
 
 // Each entry in page order, null where it could not be read, so the walk
-// counts only the unreadable entries before it stops.
-function readPage(text: string): { items: (ListEntry | null)[]; cursor: string | null } | null {
+// counts only the unreadable entries before it stops. noList is true when
+// outer[0] is missing or an empty list: a signed-out session answers [].
+// The empty last page seen after a cursor is [null, null, 1], which has a
+// null there instead.
+function readPage(text: string): { items: (ListEntry | null)[]; cursor: string | null; noList: boolean } | null {
   if (!text.startsWith(GUARD)) {
     return null;
   }
@@ -173,7 +177,7 @@ function readPage(text: string): { items: (ListEntry | null)[]; cursor: string |
   if (cursor === undefined) {
     return null;
   }
-  return { items: Array.isArray(list) ? list.map(readEntry) : [], cursor };
+  return { items: Array.isArray(list) ? list.map(readEntry) : [], cursor, noList: list === undefined || (Array.isArray(list) && list.length === 0) };
 }
 
 // Null when the text is not a list answer: no guard, no JSON after it, or not
@@ -187,9 +191,14 @@ export function parseListPage(text: string): ListPage | null {
   return { entries, cursor: page.cursor, malformed: page.items.length - entries.length };
 }
 
-// inWindow is asked about each entry's update time in epoch ms. Every page is
-// newest first by [6], so the first entry it rejects ends the walk: every one
-// after it is older. A pace() or inWindow that rejects rejects the walk.
+// inWindow is asked about each entry's update time in epoch ms, and must say
+// no only to a time before the window's start. Every page is newest first by
+// [6], so the first no ends the walk: every entry after it is older. A check
+// that also says no to a time after the window's end, as rex-spider's
+// crawlWindowContains does, would end the walk at the newest thread whenever
+// an end is set, so it must not be handed in as it is. A pace() or inWindow
+// that rejects rejects the walk. The walk logs nothing: no entry, title or id,
+// no request error, and no answer's text or url.
 export async function walkList(client: Client, inWindow: (ms: number) => Promise<boolean>, pace: () => Promise<void>, { maxPages = MAX_PAGES }: WalkOptions = {}): Promise<WalkResult> {
   const entries: ListEntry[] = [];
   const seen = new Set<string>();
@@ -221,6 +230,11 @@ export async function walkList(client: Client, inWindow: (ms: number) => Promise
     }
     const page = readPage(answer.text);
     if (page === null) {
+      return short(pages, answer);
+    }
+    // On the first page no list is an account with no threads. After a
+    // cursor it is a session that ended mid-walk, not the end of the list.
+    if (pages > 0 && page.noList) {
       return short(pages, answer);
     }
     for (const item of page.items) {

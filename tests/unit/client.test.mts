@@ -250,21 +250,35 @@ test('a request that answered leaves no timer behind to abort its signal later',
 
 const THREAD = 'https://www.google.com/search?udm=50&mstk=SECRET-MSTK&mtid=SECRET-MTID&csuir=1&hl=en';
 
-test('a fetch that rejects throws a network error that carries nothing from the failure', async () => {
+const CONSOLE = ['log', 'error', 'warn', 'info', 'debug'] as const;
+
+test('a fetch that rejects throws a network error, and the failure\'s text reaches no log line, console call or error', async (t) => {
+  const printed: string[] = [];
+  for (const method of CONSOLE) {
+    t.mock.method(console, method, (...args: unknown[]) => {
+      printed.push(`${method}: ${args.map(String).join(' ')}`);
+    });
+  }
+  const lines: string[] = [];
   const client = createClient({
+    log: (line) => lines.push(line),
     fetch: async (url) => {
-      throw new TypeError(`Failed to fetch ${url} SECRET-TITLE`);
+      throw new TypeError(`Failed to fetch ${url} SECRET-URL https://www.google.com/search?mstk=SECRET`);
     },
   });
   await assert.rejects(client.get(THREAD), (error: unknown) => {
     assert.ok(error instanceof RequestError);
     assert.equal(error.kind, 'network');
     const shown = `${error.name} ${error.message} ${String(error.stack).split('\n')[0]} ${JSON.stringify(error)} ${String((error as { cause?: unknown }).cause)}`;
-    for (const secret of ['SECRET-TITLE', 'SECRET-MSTK', 'SECRET-MTID', 'google.com']) {
+    for (const secret of ['SECRET', 'google.com']) {
       assert.ok(!shown.includes(secret), `the error shows ${secret}`);
     }
     return true;
   });
+  // Anything logged from a rejection would land a turn later.
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(lines, [], 'the failure was written to the log');
+  assert.deepEqual(printed, [], 'the failure was written to the console');
 });
 
 test('a body read that fails throws a network error too', async () => {

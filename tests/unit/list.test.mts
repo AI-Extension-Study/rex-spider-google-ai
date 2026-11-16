@@ -94,6 +94,15 @@ test('a page without the guard, or with the guard and no JSON, is null', () => {
   assert.equal(parseListPage(` )]}'\n\n[]`), null);
 });
 
+// Each still parses as a list once its first four characters are dropped, so
+// only the guard itself rejects it.
+test('a page whose first four characters are near the guard but not it is null', () => {
+  assert.equal(parseListPage(')]}\n\n[]'), null);
+  assert.equal(parseListPage("]}'\n\n[]"), null);
+  assert.equal(parseListPage(')]}"\n[null, null, 1]'), null);
+  assert.equal(parseListPage('xxxx[null, null, 1]'), null);
+});
+
 test('a page whose outer value or entry list is not a list is null', () => {
   assert.equal(parseListPage(body({ threads: [] })), null);
   assert.equal(parseListPage(body('text')), null);
@@ -381,6 +390,85 @@ test('a list that fails on page 1 returns failed with no entries and the answer'
   assert.deepEqual(got, { entries: [], outcome: 'failed', malformed: 0, answer: failing });
 });
 
+// The status decides before the body: each of these answers carries a body
+// the parser would read as a list.
+test('a non-ok answer ends the walk even when its body is a list page', async () => {
+  const events: string[] = [];
+  const signedOut = answer(SIGNED_OUT, 401);
+  let got = await walkList(fakeClient({ [listUrl(null)]: signedOut }, events), always, paced(events));
+  assert.deepEqual(got, { entries: [], outcome: 'failed', malformed: 0, answer: signedOut });
+
+  const sorry: Answer = { status: 200, url: 'https://www.google.com/sorry/index?continue=x', headers: {}, text: page(entries(0, 3)) };
+  got = await walkList(fakeClient({ [listUrl(null)]: sorry }, events), always, paced(events));
+  assert.deepEqual(got, { entries: [], outcome: 'failed', malformed: 0, answer: sorry });
+
+  const limited = answer(page(entries(20, 3)), 429, { 'retry-after': '60' });
+  got = await walkList(fakeClient({ [listUrl(null)]: answer(page(entries(0, 20), CURSOR_1)), [listUrl(CURSOR_1)]: limited }, events), always, paced(events));
+  assert.equal(got.outcome, 'partial');
+  assert.deepEqual(got.entries.map((item) => item.mtid), Array.from({ length: 20 }, (_unused, k) => id(k)));
+  assert.equal(got.answer, limited);
+});
+
+// A signed-out session answers ListThreads with [] and HTTP 200. On the
+// first page that is an account with no threads; after a cursor it means the
+// session ended mid-walk, so the walk is not whole.
+test('a signed-out answer, or an empty entry list, after a cursor ends the walk partial with page 1 and that answer', async () => {
+  for (const text of [SIGNED_OUT, body([[], null, 1]), body([])]) {
+    const events: string[] = [];
+    const out = answer(text);
+    const client = fakeClient({ [listUrl(null)]: answer(page(entries(0, 20), CURSOR_1)), [listUrl(CURSOR_1)]: out }, events);
+    const got = await walkList(client, always, paced(events));
+    assert.equal(got.outcome, 'partial', JSON.stringify(text));
+    assert.deepEqual(got.entries.map((item) => item.mtid), Array.from({ length: 20 }, (_unused, k) => id(k)));
+    assert.equal(got.answer, out);
+    assert.deepEqual(events, [`get ${listUrl(null)}`, 'pace', `get ${listUrl(CURSOR_1)}`]);
+  }
+});
+
+test('the captured last page, [null, null, 1], after a cursor still ends the walk whole', async () => {
+  const events: string[] = [];
+  const client = fakeClient({ [listUrl(null)]: answer(page(entries(0, 20), CURSOR_1)), [listUrl(CURSOR_1)]: answer(LAST_EMPTY) }, events);
+  const got = await walkList(client, always, paced(events));
+  assert.deepEqual({ outcome: got.outcome, count: got.entries.length, answer: got.answer }, { outcome: 'whole', count: 20, answer: null });
+});
+
+test('an empty first page, [] or an empty entry list, is no threads: whole with nothing', async () => {
+  for (const text of [SIGNED_OUT, body([[], null, 1]), LAST_EMPTY]) {
+    const events: string[] = [];
+    const got = await walkList(fakeClient({ [listUrl(null)]: answer(text) }, events), always, paced(events));
+    assert.deepEqual(got, { entries: [], outcome: 'whole', malformed: 0, answer: null }, JSON.stringify(text));
+  }
+});
+
+// An entry holds the thread's title and questions, and a request error can
+// name the URL, so the walk writes nothing, whichever way it ends.
+test('the walk writes nothing to the console: no title, no entry, no request error, no answer', async (t) => {
+  const printed: string[] = [];
+  for (const method of ['log', 'error', 'warn', 'info', 'debug'] as const) {
+    t.mock.method(console, method, (...args: unknown[]) => {
+      printed.push(`${method}: ${args.map(String).join(' ')}`);
+    });
+  }
+  const titled = (from: number) => [entry({ 1: `SECRET-TITLE-${from}` }, { mtid: id(from), updated: UPDATED_S - 60 * from }), entry({ 1: 'SECRET-TITLE-malformed', 22: null })];
+  const endings: [string, Reply][] = [
+    ['a request that rejects', new Error('SECRET-URL https://www.google.com/search?mstk=SECRET')],
+    ['a 500', answer('<html>SECRET-PAGE</html>', 500)],
+    ['a page that does not parse', answer('<html>SECRET-PAGE</html>')],
+    ['a sign-out', answer(SIGNED_OUT)],
+  ];
+  for (const [name, ending] of endings) {
+    const events: string[] = [];
+    const client = fakeClient({ [listUrl(null)]: answer(page(titled(0), CURSOR_1)), [listUrl(CURSOR_1)]: answer(page(titled(1), CURSOR_2)), [listUrl(CURSOR_2)]: ending }, events);
+    const got = await walkList(client, always, paced(events));
+    assert.equal(got.outcome, 'partial', name);
+    assert.equal(got.entries.length, 2, name);
+  }
+  const whole = fakeClient({ [listUrl(null)]: answer(page(titled(0), CURSOR_1)), [listUrl(CURSOR_1)]: answer(page(titled(1))) }, []);
+  assert.equal((await walkList(whole, async (ms) => ms >= (UPDATED_S - 30) * 1000, async () => {})).outcome, 'whole');
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(printed, []);
+});
+
 test('a /sorry/ answer on page 1 fails the walk and hands the answer back for the back-off', async () => {
   const events: string[] = [];
   const sorry: Answer = { status: 429, url: 'https://www.google.com/sorry/index?continue=x', headers: {}, text: '<html>' };
@@ -472,7 +560,8 @@ test('a list still paging after the page limit is cut as partial', async () => {
   assert.equal(got.outcome, 'partial');
   assert.equal(got.answer, null);
   assert.equal(got.entries.length, 3);
-  assert.equal(events.filter((event) => event.startsWith('get')).length, 3);
+  // No wait after the last request the cut allows.
+  assert.deepEqual(events, [`get ${listUrl(null)}`, 'pace', `get ${listUrl(cursor(1))}`, 'pace', `get ${listUrl(cursor(2))}`]);
 });
 
 test('a pace() or inWindow that rejects rejects the walk', async () => {

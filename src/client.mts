@@ -10,7 +10,8 @@ export type Answer = {
   status: number;
   // The URL fetch ended on, after any redirects. Google sends a session it
   // takes for automated traffic to its /sorry/ page, so classify reads it.
-  // Empty for a Response built by hand, as in tests.
+  // Empty for a Response built by hand, as in tests. Never logged: it names
+  // the request's ids or cursor.
   url: string;
   headers: Record<string, string>;
   text: string;
