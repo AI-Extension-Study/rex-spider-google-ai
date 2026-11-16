@@ -1,10 +1,8 @@
 # rex-spider-google-ai
 
-> **Do not pin this fork's `main`.** The extension installs bric-digital's `ck-refactoring` branch at `089c890` (2026-09-16), which is not on this fork. This fork's `main` (bric-digital's `fec20f6` plus this README) still has the crawler written for an older rex-spider. It has no `identifier()`, so it would not read `spider.spiders.google-ai`, and no `doBackgroundCrawl()`. With the rex-spider the extension installs, its passes would send nothing and never report an end, and every later round would report it as still crawling. To pin a change, first push bric-digital's `ck-refactoring` to this fork as a branch, then make the change on top of it.
-
 The Google AI Mode crawler for a research browser extension. While a participant's browser is open and signed in to Google, it reads the list of their AI Mode threads with their own sign-in and uploads one record for each new or changed thread.
 
-**Where it stands, 2026-11-13.** Nothing pins this fork. Everything below describes `089c890`, the code the extension runs.
+This fork's `main` holds bric-digital's `ck-refactoring` crawler at `089c890` (2026-09-16), the code the extension runs, plus this README, `.github/CODEOWNERS` and a dependency-pin spec. `ck-refactoring` is kept on this fork, locked at `089c890`, as the base. Everything below describes `089c890`.
 
 ## What it collects
 
@@ -32,12 +30,12 @@ The extension filters each record before upload; that filter is the extension's 
 
 ## Pinning a change
 
-The extension's spec is `github:bric-digital/rex-spider-google-ai#ck-refactoring`. The branch comes here with `git fetch https://github.com/bric-digital/rex-spider-google-ai.git ck-refactoring` and `git push origin FETCH_HEAD:refs/heads/ck-refactoring`; a change then branches from it and the extension pins the new commit. That branch's `package.json` asks for bric-digital's rex-spider at a `ck-refactoring` branch, which does not exist there (checked 2026-11-13); the extension's lockfile holds rex-spider at `774e813`.
+The extension's spec is `github:bric-digital/rex-spider-google-ai#089c890cfae06d428c11d9b84d8329c3138cfc50`. A change now branches from this fork's `main`, and the extension then pins the new commit. `ck-refactoring`'s `package.json` asks for bric-digital's rex-spider at a `ck-refactoring` branch, which does not exist there (checked 2026-11-16); `main`'s names rex-spider with no branch, and the lockfile holds it at `774e813`.
 
 ## What is in this repo
 
-`src/service-worker.mts` is the crawler, on this `main` the old one; `089c890`'s is on bric-digital's `ck-refactoring`. `tests/specs/serviceworker-parsing.spec.ts` is its Playwright spec, with list data in `tests/extension/data/`. `npm run build`, `npm run lint` and `npm test`, which starts Chromium and a Python web server on port 8080. `.circleci/config.yml` is bric-digital's CircleCI setup; no CI runs on this fork.
+`src/service-worker.mts` is the crawler. `tests/specs/serviceworker-parsing.spec.ts` is bric-digital's Playwright spec; it only checks that the service worker loads, and nothing reads the sample list data in `tests/extension/data/` yet. `tests/specs/dependency-pins.spec.ts` checks that `package.json` names each REX module with no commit, so the extension's pin decides it, and that the lockfile holds the commits the extension ships. `npm run build`, `npm run lint` and `npm test`, which starts Chromium and a Python web server on port 8080. `.circleci/config.yml` is bric-digital's CircleCI setup; no CI runs on this fork.
 
 ## Keeping this current
 
-Update this README when this fork's `main` takes `ck-refactoring`, or when the extension pins this fork.
+Update this README when the crawler on `main` changes, or when the extension pins this fork.
