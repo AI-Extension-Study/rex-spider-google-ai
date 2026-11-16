@@ -8,7 +8,7 @@ import type { BackoffState } from '../../src/backoff.mts';
 import { type Answer, RequestError } from '../../src/client.mts';
 import { HOME_URL } from '../../src/home.mts';
 import { listUrl } from '../../src/list.mts';
-import { PASS_LIMITS, type PassFramework, type PassLimits, type PassOutcome, type Records, runPass, windowContains } from '../../src/pass.mts';
+import { PASS_LIMITS, type PassFramework, type PassLimits, type PassOutcome, RETRY_LATE_MS, RETRY_SOON_MS, type Records, runPass, windowContains } from '../../src/pass.mts';
 import { type AimRecord, buildDetailRecord, buildSummaryRecord } from '../../src/record.mts';
 import type { DetailMemo, ModeRecord, Read, Write } from '../../src/store.mts';
 import { FOLWR_TEXT_CAP } from '../../src/stream.mts';
@@ -549,6 +549,29 @@ test('the window\'s bounds are rex-spider\'s: both ends included, null for no bo
   }
 });
 
+test('the window is on the update time: a thread created before the start and updated after it is sent', async () => {
+  const pages = [[thread(1, 1, { 5: [seconds(NOW - 20 * DAY), 0] }), thread(2, 20)]];
+  const run = await pass(site({ pages }), rexSpider({ windowStart: NOW - 10 * DAY }));
+  assert.deepEqual(readsOf(run.events), [1]);
+  assert.deepEqual([run.outcome.ids, withoutMs(run.outcome.reason)], [[mtid(1)], 'ok seen=1 dispatched=1']);
+});
+
+test('a thread updated exactly at the window\'s start is inside it: the walk goes on past it and it is sent', async () => {
+  const pages = [[thread(1, 5), thread(2, 6)]];
+  const run = await pass(site({ pages }), rexSpider({ windowStart: keyMs(5) }));
+  assert.deepEqual(readsOf(run.events), [1]);
+  assert.deepEqual([run.outcome.ids, withoutMs(run.outcome.reason)], [[mtid(1)], 'ok seen=1 dispatched=1']);
+});
+
+test('threads are sent newest first by update time even when a page lists them out of order, and ids keep the list\'s order', async () => {
+  const pages = [[thread(1, 5), thread(2, 1), thread(3, 3)]];
+  const detail = await pass(site({ pages }), rexSpider());
+  assert.deepEqual(readsOf(detail.events), [2, 3, 1]);
+  assert.deepEqual(detail.outcome.ids, [1, 2, 3].map(mtid));
+  const summary = await pass(site({ pages }), rexSpider({ summarize: true }));
+  assert.deepEqual(kindsOf(summary.sent).map(([n]) => n), ['2', '3', '1']);
+});
+
 test('a crawl window that does not come stops the pass before any request', { timeout: 5000 }, async () => {
   const web = site({ pages: [[thread(1, 1)]] });
   const run = await pass(web, rexSpider({ silentWindow: true }));
@@ -617,6 +640,13 @@ test('a list cut by a cursor handed out twice is read in part too', async () => 
   const run = await pass(web, rexSpider({ summarize: true }));
   assert.deepEqual(requestsOf(run.events), ['home', 'list 0', 'list 1']);
   assert.equal(withoutMs(run.outcome.reason), 'partial seen=2 dispatched=2 cut=repeated-cursor');
+});
+
+test('a list still handing out cursors after 100 pages is read in part, cut at the page limit', async () => {
+  const pages = Array.from({ length: 101 }, (_, k) => [thread(k + 1, k + 1)]);
+  const run = await pass(site({ pages }), rexSpider({ summarize: true }));
+  assert.equal(requestsOf(run.events).filter((name) => name.startsWith('list')).length, 100);
+  assert.deepEqual([run.outcome.count, run.outcome.ids, withoutMs(run.outcome.reason)], [-1, [], 'partial seen=100 dispatched=100 cut=page-limit']);
 });
 
 test('a list read in part that gives no thread in the crawl window is list-failed, never an empty reading', async () => {
@@ -712,6 +742,21 @@ test('the last detail record\'s key, written after the reads, counts it as left 
 
 test('the detail budget is 360 s of reading', () => {
   assert.equal(PASS_LIMITS.detailBudgetMs, 360_000);
+});
+
+// The tests run with 50 ms store and hash deadlines, so the defaults are
+// pinned here: a store deadline past the worker's 30 s idle limit, or a
+// hash one past a few seconds, would outlast the worker.
+test('the pass\'s limits are the ChatGPT crawler\'s, and the memo lengths a day and a week', () => {
+  assert.deepEqual(PASS_LIMITS, { settleMs: 3000, batch: 25, storeMs: 20_000, hashMs: 1000, detailBudgetMs: 360_000, failedRun: 3 });
+  assert.deepEqual([RETRY_SOON_MS, RETRY_LATE_MS], [DAY, 7 * DAY]);
+});
+
+test('reads that spend exactly the budget stop before the next thread: at 90 s a thread, four are read', async () => {
+  const pages = [[1, 2, 3, 4, 5, 6].map((n) => thread(n, n))];
+  const run = await pass(site({ pages }), rexSpider(), { readMs: 45_000 });
+  assert.deepEqual(readsOf(run.events), [1, 2, 3, 4]);
+  assert.equal(withoutMs(run.outcome.reason), 'ok seen=6 dispatched=4 left=2 stop=budget');
 });
 
 test('the detail budget counts the reading: at 100 s a thread (two 50 s requests), the reads stop after four and the rest wait for a later pass', async () => {

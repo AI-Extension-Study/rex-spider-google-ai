@@ -40,9 +40,13 @@ export function threadPageUrl(entry: ListEntry): string {
 
 // A value is taken as written, so one that would need decoding (an entity),
 // or holds a space, a quote or a bracket, counts as missing rather than be
-// sent on changed. Captured forms: letters, digits, '-', '_' and the xsrf
-// token's ':'.
+// sent on changed. VALUE finds the first of each kind; a value not in its
+// captured form (ID_FORM, and for the xsrf token XSRF_FORM) then counts as
+// missing too, so the folwr URL is always in the form its allow pattern
+// names (allowed.mts), which Chrome's size limit keeps that narrow.
 const VALUE = '([^\\s"\'<>&]+)';
+const ID_FORM = /^[A-Za-z0-9_-]+$/;
+const XSRF_FORM = /^[A-Za-z0-9_-]+(?::[A-Za-z0-9_-]+)*$/;
 const attribute = (name: string) => new RegExp(`\\s${name}="${VALUE}"`);
 const GARC = attribute('data-garc');
 const MLRO = attribute('data-lro-token');
@@ -53,11 +57,15 @@ const EI = new RegExp(`kEI:'${VALUE}'`);
 // The five values, each the first of its kind on the page, or null when any
 // is missing.
 export function folwrValues(html: string): FolwrValues | null {
-  const garc = GARC.exec(html)?.[1];
-  const mlro = MLRO.exec(html)?.[1];
-  const mlros = MLROS.exec(html)?.[1];
-  const xsrf = XSRF.exec(html)?.[1];
-  const ei = EI.exec(html)?.[1];
+  const found = (pattern: RegExp, form: RegExp): string | undefined => {
+    const value = pattern.exec(html)?.[1];
+    return value !== undefined && form.test(value) ? value : undefined;
+  };
+  const garc = found(GARC, ID_FORM);
+  const mlro = found(MLRO, ID_FORM);
+  const mlros = found(MLROS, ID_FORM);
+  const xsrf = found(XSRF, XSRF_FORM);
+  const ei = found(EI, ID_FORM);
   if (garc === undefined || mlro === undefined || mlros === undefined || xsrf === undefined || ei === undefined) {
     return null;
   }

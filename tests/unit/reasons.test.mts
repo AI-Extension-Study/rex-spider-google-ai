@@ -37,6 +37,15 @@ test('no field takes text: a string where a count goes, a value outside a fixed 
   assert.throws(() => formatReason('toString' as never, { ms: 0 } as never), /not in the catalogue/);
 });
 
+test('a pass with no reading of the list stopped at the home page or the list, never at the start; a switch-off never at the home page', () => {
+  const codes: [string, Record<string, unknown>][] = [['not-signed-in', {}], ['rate-limited', {}], ['challenge', {}], ['http-error', { status: 500 }], ['network', {}], ['timeout', {}]];
+  for (const [code, fields] of codes) {
+    assert.throws(() => formatReason(code as never, { stage: 'start', ...fields, ms: 0 } as never), /stage/, code);
+    assert.doesNotThrow(() => formatReason(code as never, { stage: 'list', ...fields, ms: 0 } as never), code);
+  }
+  assert.throws(() => formatReason('disabled', { stage: 'home' as never, ms: 0 }), /stage/);
+});
+
 test('a count is a whole number of at least 0', () => {
   for (const bad of [-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
     assert.throws(() => formatReason('ok', { seen: bad, dispatched: 0, ms: 0 }), /seen/, String(bad));

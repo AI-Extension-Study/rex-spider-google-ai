@@ -92,8 +92,18 @@ test('Chrome takes every allow pattern as a rule, and with a block arm\'s redire
   const seen = await serviceWorker.evaluate(async ({ crawler, blocked }) => {
     const dnr = chrome.declarativeNetRequest
     const patterns = self.rexGoogleAIPlugin.allowedUrls()
+    // Case-insensitive, as rex-page-manipulation's rules are (it does not set
+    // isUrlFilterCaseSensitive).
     const supported = []
-    for (const regex of patterns) supported.push(await dnr.isRegexSupported({ regex }))
+    for (const regex of patterns) supported.push(await dnr.isRegexSupported({ regex, isCaseSensitive: false }))
+    // Room under Chrome's 2 KB compiled limit: each pattern still fits with two
+    // more parameters of the widest value class any form has used. A pattern
+    // Chrome refuses fails rex-page-manipulation's whole rule update, every
+    // arm's redirects with it, and fetchAllowedURLs hands it every enabled
+    // spider's patterns.
+    const GROW = '&x=[A-Za-z0-9*._%-]+&y=[A-Za-z0-9*._%-]+'
+    const grown = []
+    for (const regex of patterns) grown.push(await dnr.isRegexSupported({ regex: `${regex.slice(0, -1)}${GROW}$`, isCaseSensitive: false }))
     const fromModule = await new Promise((resolve) => self.rexSpiderPlugin.handleMessage({ messageType: 'fetchAllowedURLs' }, null, resolve))
     // As rex-page-manipulation builds them: the block arm's redirect, and an
     // allow rule at priority 1000 for each pattern.
@@ -117,11 +127,12 @@ test('Chrome takes every allow pattern as a rule, and with a block arm\'s redire
     } finally {
       await dnr.updateDynamicRules({ removeRuleIds: rules.map((rule) => rule.id) })
     }
-    return { patterns, supported, fromModule, ...outcome }
+    return { patterns, supported, grown, fromModule, ...outcome }
   }, { crawler: CRAWLER, blocked: BLOCKED })
   expect(seen.error).toBeUndefined()
   expect(seen.patterns.length).toBe(4)
   expect(seen.supported).toEqual(seen.patterns.map(() => ({ isSupported: true })))
+  expect(seen.grown).toEqual(seen.patterns.map(() => ({ isSupported: true })))
   expect([...seen.fromModule].sort()).toEqual([...seen.patterns].sort())
   expect(seen.added).toBe(5)
   // Each crawler request matches its own allow rule, the thread page past the redirect.

@@ -7,9 +7,9 @@
 // gets through only by its pattern, and a pattern that matched a request
 // Google's own pages make would open AI Mode to the participant. So each is
 // anchored at both ends and pinned to the crawler's form: its host, its
-// path, its parameters in the crawler's order, and each value in the
-// characters its encoding can produce, never .*. Google's own requests use
-// other forms (tests/unit/allowed.test.mts lists them).
+// path, its parameters in the crawler's order, and each value in the form
+// the crawler sends it, never .*. Google's own requests use other forms
+// (tests/unit/allowed.test.mts lists them).
 import { PAGE_SIZE } from './list.mts';
 
 const ORIGIN = '^https://www\\.google\\.com/';
@@ -18,14 +18,15 @@ const ORIGIN = '^https://www\\.google\\.com/';
 // (list.mts), and encodeURIComponent leaves those characters as they are.
 const ID = '[A-Za-z0-9_-]+';
 
-// A value URLSearchParams wrote: letters, digits and *-._ as they are, any
-// other character as %XX, so one class of those characters and %. The folwr
-// values are taken from the page as any run without white space, a quote, <,
-// > or & (read.mts), so the + that URLSearchParams writes for a space never
-// occurs. Not (?:[...]|%[0-9A-F]{2})+: Chrome refuses the folwr pattern
-// written so, as over its 2 KB compiled limit, and a refused rule fails
-// rex-page-manipulation's whole rule update, the block rules with it.
-const ENCODED = '[A-Za-z0-9*._%-]+';
+// The xsrf token as URLSearchParams writes it: id-form runs joined by colons,
+// each colon written %3A. folwrValues (read.mts) takes the five folwr values
+// only in the forms the capture recorded (the other four in id form), so every
+// folwr URL the crawler builds is in this form. A wider value class does not
+// fit: Chrome refuses a regexFilter over 2 KB compiled, a refused rule fails
+// rex-page-manipulation's whole rule update (every arm's redirects with it),
+// and five values of [A-Za-z0-9*._%-]+ left room for only one more such group
+// (tests/specs/spider.spec.ts checks for two).
+const XSRF = `${ID}(?:%3A${ID})*`;
 
 export const ALLOWED_URL_PATTERNS: readonly string[] = Object.freeze([
   // The home page (home.mts, HOME_URL).
@@ -36,5 +37,5 @@ export const ALLOWED_URL_PATTERNS: readonly string[] = Object.freeze([
   // A thread page (read.mts, threadPageUrl).
   `${ORIGIN}search\\?udm=50&mstk=${ID}&mtid=${ID}&csuir=1&hl=en$`,
   // A thread's folwr (read.mts, folwrUrl): the five parameters, async first.
-  `${ORIGIN}async/folwr\\?async=_fmt%3Aprog%2C_xsrf%3A${ENCODED}&garc=${ENCODED}&mlro=${ENCODED}&mlros=${ENCODED}&ei=${ENCODED}$`,
+  `${ORIGIN}async/folwr\\?async=_fmt%3Aprog%2C_xsrf%3A${XSRF}&garc=${ID}&mlro=${ID}&mlros=${ID}&ei=${ID}$`,
 ]);

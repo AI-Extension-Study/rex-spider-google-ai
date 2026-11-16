@@ -15,7 +15,9 @@ import { folwrUrl, folwrValues, threadPageUrl } from '../../src/read.mts';
 import { MSTK, MTID, listEntry } from './fixtures.mts';
 import { FOLWR_VALUES, threadPage } from './thread-fixtures.mts';
 
-const matches = (url: string): string[] => ALLOWED_URL_PATTERNS.filter((pattern) => new RegExp(pattern).test(url));
+// Case-insensitive, as Chrome matches a rule whose isUrlFilterCaseSensitive is
+// not set, which is how rex-page-manipulation writes them.
+const matches = (url: string): string[] => ALLOWED_URL_PATTERNS.filter((pattern) => new RegExp(pattern, 'i').test(url));
 
 // Ids at the longest the list accepts: an mtid of 64, an mstk and a cursor of
 // 1,024, in id form.
@@ -24,9 +26,9 @@ const LONG_MSTK = 'Mk_-0189'.repeat(128);
 const LONG_CURSOR = 'Cu-_7'.repeat(204) + 'Cu-_';
 const idEntry = (mstk: string, mtid: string) => listEntry({ 0: [mstk, mtid], 22: [['mtid', mtid], ['csuir', '1'], ['mstk', mstk], ['udm', '50']] });
 
-// Every character folwrValues takes from a page (anything but white space, a
-// quote, <, > and &), non-ASCII included, as each of the five values.
-const ODD = '!#$%()*+,-./09:;=?@AZ[\\]^_`az{|}~é\u{1F345}';
+// The five values at the edges of the forms folwrValues takes: every id-form
+// character, and in the xsrf token several colons.
+const EDGES = { garc: 'AZaz09_-', mlro: `${'-_'.repeat(80)}Zz`, mlros: 'a', xsrf: 'a_-0:Z9:x:1763300000000', ei: '_' };
 
 test('the spider asks for four forms of URL, one pattern each, and every URL it builds matches exactly one', () => {
   assert.equal(ALLOWED_URL_PATTERNS.length, 4);
@@ -38,7 +40,7 @@ test('the spider asks for four forms of URL, one pattern each, and every URL it 
     ['thread page', threadPageUrl(listEntry())],
     ['thread page, the longest ids', threadPageUrl(idEntry(LONG_MSTK, LONG_MTID))],
     ['folwr', folwrUrl(FOLWR_VALUES)],
-    ['folwr, every value odd', folwrUrl({ garc: ODD, mlro: ODD, mlros: ODD, xsrf: ODD, ei: ODD })],
+    ['folwr, values at the edges of their forms', folwrUrl(EDGES)],
   ];
   const used = new Set<string>();
   for (const [name, url] of built) {
@@ -49,10 +51,10 @@ test('the spider asks for four forms of URL, one pattern each, and every URL it 
   assert.equal(used.size, ALLOWED_URL_PATTERNS.length, 'a pattern no request of the spider uses');
 });
 
-test('a folwr URL built from a page whose values hold every character the page reader takes still matches', () => {
-  const values = folwrValues(threadPage({ garc: ODD, mlro: ODD, mlros: ODD, xsrf: ODD, ei: ODD }));
-  assert.ok(values !== null, 'Test setup invalid: the page reader did not take the values');
-  assert.equal(matches(folwrUrl(values)).length, 1);
+test('a folwr URL built from a page whose values sit at the edges of the forms the page reader takes still matches', () => {
+  const values = folwrValues(threadPage(EDGES));
+  assert.deepEqual(values, EDGES, 'Test setup invalid: the page reader did not take the values');
+  assert.equal(matches(folwrUrl(EDGES)).length, 1);
 });
 
 test('no pattern holds .* or .+, every dot is escaped, and each is anchored to https://www.google.com/ at the start and $ at the end', () => {
@@ -136,5 +138,63 @@ test('a URL one step away from the crawler\'s forms matches no pattern', () => {
   ];
   for (const [name, url] of near) {
     assert.deepEqual(matches(url), [], name);
+  }
+});
+
+// Each of the crawler's URLs with one query parameter left out, by name.
+function eachDropped(url: string): [string, string][] {
+  const [base, query] = url.split('?');
+  const params = query.split('&');
+  return params.map((param, at) => [param.split('=')[0], `${base}?${params.filter((_, other) => other !== at).join('&')}`]);
+}
+
+test('the crawler\'s URLs with any one parameter left out, or a slot of the list\'s reqpld left out or empty, match no pattern', () => {
+  const urls = [HOME_URL, listUrl(null), listUrl('Cursor-AAAAAAAAAAAAAAAAAAAAAAAAA1'), threadPageUrl(listEntry()), folwrUrl(FOLWR_VALUES)];
+  for (const url of urls) {
+    for (const [name, near] of eachDropped(url)) {
+      assert.deepEqual(matches(near), [], `${new URL(url).pathname} without ${name}`);
+    }
+  }
+  const list = (slots: string) => `${G}/httpservice/web/AimThreadsService/ListThreads?hl=en&reqpld=${slots}&msc=gwsclient`;
+  const slots = [null, 20, 0, null, null];
+  for (let at = 0; at < slots.length; at += 1) {
+    const near = list(encodeURIComponent(JSON.stringify(slots.filter((_, other) => other !== at))));
+    assert.deepEqual(matches(near), [], `reqpld without slot ${at}`);
+  }
+  assert.deepEqual(matches(list('%5Bnull%2C20%2C0%2Cnull%2C%5D')), [], 'reqpld with an empty cursor slot');
+  assert.deepEqual(matches(list('%5Bnull%2C20%2C0%2Cnull%2C%22%22%5D')), [], 'reqpld with an empty cursor');
+});
+
+// The four characters a value's class forbids, as a value could carry them:
+// a dot, a percent escape, a colon and a plus.
+const OUTSIDE = ['Made.up', 'Made%2Eup', 'Made:up', 'Made+up'];
+
+test('an id or a value holding a character its class forbids matches no pattern', () => {
+  const near: [string, string][] = [];
+  for (const bad of OUTSIDE) {
+    near.push(
+      [`mstk ${bad}`, `${G}/search?udm=50&mstk=${bad}&mtid=${MTID}&csuir=1&hl=en`],
+      [`mtid ${bad}`, `${G}/search?udm=50&mstk=${MSTK}&mtid=${bad}&csuir=1&hl=en`],
+      [`cursor ${bad}`, `${G}/httpservice/web/AimThreadsService/ListThreads?hl=en&reqpld=%5Bnull%2C20%2C0%2Cnull%2C%22${bad}%22%5D&msc=gwsclient`],
+    );
+    for (const key of ['garc', 'mlro', 'mlros', 'ei']) {
+      const values: Record<string, string> = { async: ASYNC, garc: GARC, mlro: MLRO, mlros: MLROS, ei: EI, [key]: bad };
+      near.push([`folwr ${key} ${bad}`, `${G}/async/folwr?${query(Object.entries(values))}`]);
+    }
+  }
+  // The xsrf token as it reaches the URL: anything but id-form runs joined by
+  // %3A.
+  for (const xsrf of ['Made.up', 'Made%2Fup', 'Made:up', 'Made+up', 'Made%3A', '%3AMade', 'Made%3A%3Aup']) {
+    near.push([`folwr xsrf ${xsrf}`, `${G}/async/folwr?${query([['async', `_fmt%3Aprog%2C_xsrf%3A${xsrf}`], ['garc', GARC], ['mlro', MLRO], ['mlros', MLROS], ['ei', EI]])}`]);
+  }
+  for (const [name, url] of near) {
+    assert.deepEqual(matches(url), [], name);
+  }
+});
+
+test('a folwr whose async value is not _fmt:prog,_xsrf:<token> matches no pattern', () => {
+  const rest = `garc=${GARC}&mlro=${MLRO}&mlros=${MLROS}&ei=${EI}`;
+  for (const value of [XSRF, `_fmt%3Aprog%2C_id%3A${XSRF}`, `_fmt%3Ajson%2C_xsrf%3A${XSRF}`, `_xsrf%3A${XSRF}`, '_fmt%3Aprog', `_fmt:prog,_xsrf:${FOLWR_VALUES.xsrf}`, '_fmt%3Aprog%2C_xsrf%3A']) {
+    assert.deepEqual(matches(`${G}/async/folwr?async=${value}&${rest}`), [], value);
   }
 });
