@@ -1,0 +1,106 @@
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
+
+import { DateString } from '@bric/rex-types/types';
+
+import { BACKOFF_KEY, MODE_KEY, keyKind, legacyKeyId, memoKey, uploadKeyId } from '../../src/keys.mts';
+import { type ListEntry, parseListPage } from '../../src/list.mts';
+
+// Synthetic ids in the captured forms: an mtid of 22 characters, an mstk of
+// 30 and more, both [A-Za-z0-9_-].
+const MTID = 'AbCdEfGhIjKlMnOpQrSt_1';
+const MSTK = 'Mstk-0123456789_abcdefghijKLMNO';
+
+const CREATED_S = 1_763_300_000; // 2025-11-16T13:33:20Z
+const UPDATED_S = 1_763_303_600; // an hour later
+
+// rex-spider's fetchUploadKey: the key it stores and looks up for the id and
+// time a spider hands to checkIfAlreadyTransmitted and logTransmitted
+// (rex-spider src/service-worker.mts:332-336, at 774e813, the commit the lock
+// pins). It is private, and its module loads rex-core, which does not load
+// under Node, so the test applies the same formula.
+const transmitted = (id: string, updated: DateString) => `rex-spider-google-ai-conversation-upload-${id}-${Math.round(updated.timestamp())}`;
+
+test('the three key ids: the bare mtid in summary mode, mtid-detail in detail mode, mstk_mtid as the old spider wrote it', () => {
+  assert.equal(uploadKeyId(MTID, true), MTID);
+  assert.equal(uploadKeyId(MTID, false), `${MTID}-detail`);
+  assert.equal(legacyKeyId({ mstk: MSTK, mtid: MTID }), `${MSTK}_${MTID}`);
+  assert.equal(uploadKeyId('t1', true), 't1');
+  assert.equal(uploadKeyId('t1', false), 't1-detail');
+  assert.equal(legacyKeyId({ mstk: 'k1', mtid: 't1' }), 'k1_t1');
+});
+
+test('the upload key rex-spider builds differs between the two modes and the old form for one thread at one time', () => {
+  const updated = new DateString(UPDATED_S);
+  assert.equal(transmitted(uploadKeyId(MTID, true), updated), `rex-spider-google-ai-conversation-upload-${MTID}-1763303600000`);
+  assert.equal(transmitted(uploadKeyId(MTID, false), updated), `rex-spider-google-ai-conversation-upload-${MTID}-detail-1763303600000`);
+  assert.equal(transmitted(legacyKeyId({ mstk: MSTK, mtid: MTID }), updated), `rex-spider-google-ai-conversation-upload-${MSTK}_${MTID}-1763303600000`);
+});
+
+// The old spider's key must be rebuilt to the millisecond, or every thread it
+// sent looks unsent and goes out again whatever its age. Each case below reads
+// list JSON through parseListPage, as the pass will, and builds the key from
+// legacyKeyId and the entry's updated. The old spider's key is built from the
+// same JSON the way it built it (089c890, src/service-worker.mts): the id
+// `${[0][0]}_${[0][1]}` (:96), the time new DateString([6][0]) (:109), or
+// new DateString([5][0]) when [6] is null (:100), handed to
+// checkIfAlreadyTransmitted and logTransmitted (:161, :295). [0][0] equals
+// [22]'s mstk on every entry the capture read, and the list reads the mstk
+// from [22].
+function rawEntry(updated: [number, number] | null): unknown[] {
+  const at: unknown[] = new Array(31).fill(null);
+  at[0] = [MSTK, MTID];
+  at[1] = 'A TITLE';
+  at[5] = [CREATED_S, 741_739_000];
+  at[6] = updated;
+  at[22] = [['mtid', MTID], ['csuir', '1'], ['mstk', MSTK], ['udm', '50']];
+  return at;
+}
+
+function readEntry(raw: unknown[]): ListEntry {
+  const page = parseListPage(`)]}'\n\n${JSON.stringify([[raw], null, 1])}`);
+  assert.ok(page !== null && page.entries.length === 1, 'Test setup invalid: the list did not read the entry');
+  return page.entries[0];
+}
+
+test('a thread the old spider sent keeps the key it stored, to the millisecond, built from the list entry', () => {
+  const entry = readEntry(rawEntry([UPDATED_S, 263_669_000]));
+  const old = transmitted(`${MSTK}_${MTID}`, new DateString(UPDATED_S));
+  assert.equal(old, `rex-spider-google-ai-conversation-upload-${MSTK}_${MTID}-${UPDATED_S * 1000}`);
+  assert.equal(transmitted(legacyKeyId(entry), entry.updated), old);
+});
+
+test('a thread with no update time keeps the old key too: the time is the creation time, as the old spider read it', () => {
+  const entry = readEntry(rawEntry(null));
+  const old = transmitted(`${MSTK}_${MTID}`, new DateString(CREATED_S));
+  assert.equal(old, `rex-spider-google-ai-conversation-upload-${MSTK}_${MTID}-${CREATED_S * 1000}`);
+  assert.equal(transmitted(legacyKeyId(entry), entry.updated), old);
+});
+
+test('the mode record, the back-off and the memos sit under the spider\'s namespace', () => {
+  assert.equal(MODE_KEY, 'rex-spider-google-ai-mode');
+  assert.equal(BACKOFF_KEY, 'rex-spider-google-ai-backoff');
+  assert.equal(memoKey(MTID), `rex-spider-google-ai-detail-memo-${MTID}`);
+});
+
+test('every key id needs its ids', () => {
+  assert.throws(() => memoKey(''), TypeError);
+  assert.throws(() => uploadKeyId('', true), TypeError);
+  assert.throws(() => legacyKeyId({ mstk: '', mtid: MTID }), TypeError);
+  assert.throws(() => legacyKeyId({ mstk: MSTK, mtid: '' }), TypeError);
+});
+
+test('an id that is not a string is refused at run time too', () => {
+  assert.throws(() => memoKey(123 as unknown as string), TypeError);
+  assert.throws(() => uploadKeyId(null as unknown as string, false), TypeError);
+  assert.throws(() => legacyKeyId({ mstk: undefined as unknown as string, mtid: MTID }), TypeError);
+  assert.throws(() => legacyKeyId({ mstk: MSTK, mtid: 7 as unknown as string }), TypeError);
+});
+
+test('what may be logged of a key is its kind, never a thread id', () => {
+  assert.equal(keyKind(MODE_KEY), 'rex-spider-google-ai-mode');
+  assert.equal(keyKind(BACKOFF_KEY), 'rex-spider-google-ai-backoff');
+  assert.equal(keyKind(memoKey(MTID)), 'rex-spider-google-ai-detail-memo');
+  assert.equal(keyKind(`rex-spider-google-ai-conversation-upload-${MTID}-1763303600000`), 'other key');
+  assert.equal(keyKind(`rex-spider-google-ai-conversation-upload-${MSTK}_${MTID}-1763303600000`), 'other key');
+});
