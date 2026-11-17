@@ -16,7 +16,7 @@ import type { AddressInfo } from 'node:net'
 import type { BrowserContext, Route } from '@playwright/test'
 
 import { rawEntry } from '../unit/entry-fixtures.mts'
-import { FOLWR_VALUES, threadPage, threadStream } from '../unit/thread-fixtures.mts'
+import { FOLWR_VALUES, limitedPage, threadPage, threadStream } from '../unit/thread-fixtures.mts'
 
 // Thread n's ids in the list's forms: an mtid of 22 characters and an mstk
 // of 31, and the garc its thread page carries, so a folwr request names its
@@ -83,6 +83,15 @@ export class GoogleSite {
   pages: Thread[][] = [[]]
 
   signedIn = true
+
+  // The thread page read, counted from 1 over every pass, from which on the
+  // site answers each thread page with Google's limited page (a 200 search
+  // page with none of the five values), as Google did after about 40
+  // requests; null for never.
+  limitedFrom: number | null = null
+
+  // Thread pages answered so far.
+  private pageReads = 0
 
   // An answer in place of the site's own, by label, for every request with
   // that label until it is deleted.
@@ -171,13 +180,15 @@ export class GoogleSite {
     }
     this.requests.push(label)
     this.urls.push(url)
+    if (label.startsWith('page ')) this.pageReads += 1
+    const limited = label.startsWith('page ') && this.limitedFrom !== null && this.pageReads >= this.limitedFrom
     const gate = this.gates.get(label)
     if (gate !== undefined) {
       this.gates.delete(label)
       gate.reach()
       await gate.released
     }
-    await route.fulfill(this.replies.get(label) ?? this.ownReply(label))
+    await route.fulfill(this.replies.get(label) ?? (limited ? html(limitedPage()) : this.ownReply(label)))
   }
 }
 

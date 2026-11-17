@@ -345,6 +345,72 @@ test('a redirect to /sorry/ ends the pass as a challenge, read from the URL the 
   }
 })
 
+// After about 40 requests Google answers the thread page with a limited
+// page: a 200 search page with none of the five values. Here it comes from
+// the third thread read on. The home page still says signed in, so the pass
+// stops as limited with a 60-minute back-off, and that thread gets nothing,
+// not even its summary, so a later pass reads it.
+test('a limited thread page stops the pass as limited after the records before it, with nothing for that thread, and the back-off it sets skips the next pass with no request', async ({ google, serviceWorker }) => {
+  const threads = [4, 3, 2, 1].map((n) => ({ n, updated: T + n * 600 }))
+  google.pages = [threads]
+  google.limitedFrom = 3
+  await untilStoreOpen(serviceWorker)
+  await configure(serviceWorker)
+
+  const before = Date.now()
+  const round = await crawl(serviceWorker)
+  const after = Date.now()
+  expect(google.requests.splice(0)).toEqual(['home', 'list 0', 'page 4', 'folwr 4', 'page 3', 'folwr 3', 'page 2', 'home'])
+  expect(records(round)).toEqual([detailRecord(threads[0]), detailRecord(threads[1])])
+  expect(records(round).filter((record) => record.identifier === mtid(2))).toEqual([])
+  expectInLayout(round)
+  expect(completions(round)).toEqual([[2, threads.map((thread) => mtid(thread.n)), 'ok seen=4 dispatched=2 left=2 stop=limited']])
+  const backoff = await fetchValue(serviceWorker, 'rex-spider-google-ai-backoff')
+  expect(backoff).toEqual({ until: expect.any(Number), failures: 1, code: 'limited' })
+  expect(backoff.until).toBeGreaterThanOrEqual(before + 3_600_000)
+  expect(backoff.until).toBeLessThanOrEqual(after + 3_600_000)
+  // No memo and no upload key for the limited thread, in either mode.
+  expect(await fetchValue(serviceWorker, `rex-spider-google-ai-detail-memo-${mtid(2)}`)).toBeNull()
+  for (const id of [`${mtid(2)}-detail`, mtid(2)]) {
+    expect(await fetchValue(serviceWorker, `rex-spider-google-ai-conversation-upload-${id}-${threads[2].updated * 1000}`)).toBeNull()
+  }
+  // Each of the three page reads was counted before its request.
+  const times = await fetchValue(serviceWorker, 'rex-spider-google-ai-read-times')
+  expect(times).toHaveLength(3)
+  for (const time of times) {
+    expect(time).toBeGreaterThanOrEqual(before)
+    expect(time).toBeLessThanOrEqual(after)
+  }
+
+  const skipped = await crawl(serviceWorker)
+  const reason = `backoff until=${new Date(backoff.until).toISOString()} code=limited`
+  expect(google.requests).toEqual([])
+  expect(records(skipped)).toEqual([])
+  expect(completions(skipped)).toEqual([[-1, [], reason]])
+  expect(skipped.result).toEqual({ sitesCrawled: ['google-ai'], issues: [{ url: LOGIN, message: reason }] })
+  expect(await fetchValue(serviceWorker, 'rex-spider-google-ai-read-times')).toEqual(times)
+})
+
+// At most 15 thread reads in any 60 minutes, counted across passes in the
+// extension's storage. Seeded as spent, a detail pass reads the list and no
+// thread, and leaves every thread for a later pass.
+test('with 15 thread reads stored in the last hour, a detail pass reads no thread and stops as read-budget', async ({ google, serviceWorker }) => {
+  const threads = [2, 1].map((n) => ({ n, updated: T + n * 600 }))
+  google.pages = [threads]
+  await untilStoreOpen(serviceWorker)
+  const now = Date.now()
+  const spent = Array.from({ length: 15 }, (_, k) => now - (15 - k) * 60_000)
+  expect(await storeValue(serviceWorker, 'rex-spider-google-ai-read-times', spent)).toBe(true)
+  await configure(serviceWorker)
+
+  const round = await crawl(serviceWorker)
+  expect(google.requests.splice(0)).toEqual(['home', 'list 0'])
+  expect(records(round)).toEqual([])
+  expect(completions(round)).toEqual([[0, threads.map((thread) => mtid(thread.n)), 'ok seen=2 dispatched=0 left=2 stop=read-budget']])
+  expect(await fetchValue(serviceWorker, 'rex-spider-google-ai-read-times')).toEqual(spent)
+  expect(await fetchValue(serviceWorker, 'rex-spider-google-ai-backoff')).toBeNull()
+})
+
 test('a list of three pages is walked by its cursors, and every thread on it goes out, newest first', async ({ google, serviceWorker }) => {
   const threads = [5, 4, 3, 2, 1].map((n) => ({ n, updated: T + n * 600 }))
   google.pages = [threads.slice(0, 2), threads.slice(2, 4), threads.slice(4)]
