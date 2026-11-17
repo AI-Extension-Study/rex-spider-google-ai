@@ -236,11 +236,46 @@ test('a point that is not a format 1 record of this platform, or whose top level
   assert.deepEqual(wrong, []);
 });
 
+test('a list time at the edges of 2001 to 2286: from 1e9 to 1e10 - 1 seconds the record comes back equal, one second outside it is cut to the scaffold', () => {
+  // [5] and [6] as the list sends them, seconds and nanoseconds; started is
+  // [5] and ended [6], so a detail (dated by started) and a summary (dated by
+  // ended) check each edge on both times.
+  const at = (created: number, updated: number) => listEntry({ 5: [created, 0], 6: [updated, 0] });
+  const middle = 1.5e9;
+  const cases: Array<[string, ListEntry, boolean]> = [
+    ['both at 1e9', at(1e9, 1e9), true],
+    ['both at 1e10 - 1', at(1e10 - 1, 1e10 - 1), true],
+    ['started at 1e9, ended at 1e10 - 1', at(1e9, 1e10 - 1), true],
+    ['started at 1e9 - 1', at(1e9 - 1, middle), false],
+    ['ended at 1e9 - 1', at(middle, 1e9 - 1), false],
+    ['started at 1e10', at(1e10, middle), false],
+    ['ended at 1e10', at(middle, 1e10), false],
+    ['both at 1e10', at(1e10, 1e10), false],
+  ];
+  for (const [what, entry, kept] of cases) {
+    for (const record of [summaryOf(entry), detailOf(entry, thread(SMALL))]) {
+      const out = redact(record);
+      const label = `${what}, is_summary ${String(record.is_summary)}`;
+      if (kept) {
+        assert.equal(wire(out), wire(record), label);
+      } else {
+        assert.deepEqual(out, scaffoldOf(record), label);
+      }
+    }
+  }
+});
+
 test('the scaffold keeps each field only in its form, and the PDK envelope keys as they come, on a record too', () => {
   const event = { name: 'Rex Conversation', platform: PLATFORM, identifier: MARK, date: 'today', generatorId: 'rex-conversation', _pdk_trace_context: { bundle_id: 1 }, 'passive-data-metadata': { timestamp: 2 }, title: MARK };
   assert.deepEqual(redact(event), { platform: PLATFORM, generatorId: 'rex-conversation', _pdk_trace_context: { bundle_id: 1 }, 'passive-data-metadata': { timestamp: 2 } });
   assert.deepEqual(redact({ name: NAME, platform: MARK, generatorId: MARK, date: Number.NaN }), { name: NAME });
   assert.deepEqual(redact({ name: NAME, platform: PLATFORM, date: Number.POSITIVE_INFINITY, identifier: MTID }), { name: NAME, platform: PLATFORM, identifier: MTID });
+  // A lowercase word of up to 64 characters is kept, and one of 65 is not.
+  for (const key of ['name', 'platform', 'generatorId']) {
+    assert.deepEqual(redact({ [key]: 'a'.repeat(64) }), { [key]: 'a'.repeat(64) }, `${key} of 64 characters`);
+    assert.deepEqual(redact({ [key]: 'a-'.repeat(32) }), { [key]: 'a-'.repeat(32) }, `${key} of 64 characters with hyphens`);
+    assert.deepEqual(redact({ [key]: 'a'.repeat(65) }), {}, `${key} of 65 characters`);
+  }
   for (const record of [SUMMARY, DETAIL]) {
     const out = redact({ ...record, generatorId: 'rex-conversation', _pdk_trace_context: { bundle_id: 1 }, 'passive-data-metadata': { timestamp: 2 } });
     assert.deepEqual([out.generatorId, out._pdk_trace_context, out['passive-data-metadata'], out.is_summary], ['rex-conversation', { bundle_id: 1 }, { timestamp: 2 }, record.is_summary]);
@@ -339,6 +374,8 @@ test('a title hash or a time with text riding on it, or in another form than the
   // writing stop them.
   const times = [...riders(CREATED_ISO), `${CREATED_ISO}[x=marker]`, '2025-11-16T13:33:20.500Z', '2025-11-16T13:33:20.000Z', '2025-11-16T13:33:20+00:00', '2025-11-16T13:33:20.5+00:00',
     '2025-11-16 13:33:20Z', '2025-11-16t13:33:20z', '2025-13-16T13:33:20Z', '2025-11-16T24:00:00Z', '+002025-11-16T13:33:20Z', '2025-11-16T13:33Z', CREATED_S, null,
+    // No zone: a local time, which names no instant.
+    '2025-11-16T13:33:20', '2025-11-16T13:33:20.5',
     // Temporal writes these back exactly; only the four-digit year stops them.
     '+010000-01-01T00:00:00Z', '-000001-01-01T00:00:00Z'];
   for (const record of [SUMMARY, DETAIL]) {
