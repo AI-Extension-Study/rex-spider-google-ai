@@ -21,15 +21,16 @@ export const test = base.extend<{
         `--disable-extensions-except=${pathToExtension}`,
         `--load-extension=${pathToExtension}`,
         `--enable-features=DeclarativeNetRequestFeedback`,
+        // No host name resolves but loopback's, so a request no route
+        // answers fails in the browser instead of reaching a real site.
+        // Playwright does not route the request a redirect leads to.
+        '--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1',
       ],
     });
 
-    use(context)
-      .then(() => {
-        setTimeout(() => {
-          context.close();
-        }, 10000)
-    })
+    // Closed once the test and every fixture built on it are done.
+    await use(context)
+    await context.close()
   },
   extensionId: async ({ context }, use) => {
     // for manifest v3:
@@ -50,10 +51,7 @@ export const test = base.extend<{
       serviceWorker = await context.waitForEvent('serviceworker');
     }
 
-    use(serviceWorker)
-      .then(() => {
-        context.close();
-    })
+    await use(serviceWorker)
   },
 });
 
