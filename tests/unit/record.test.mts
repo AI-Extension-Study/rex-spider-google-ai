@@ -203,6 +203,101 @@ test('a detail record\'s date is its started in epoch ms, not its ended', async 
   assert.notEqual(record.date, entry.updated.timestamp());
 });
 
+// On threads begun from an AI Overview follow-up ([27] is 2, as in the
+// fixture), the list's [6] can be seconds to minutes before its [5]. A record
+// starts at the earlier of the two so it never ends before it starts, and
+// created_at and updated_at keep the entry's own two times.
+const EARLY_S = CREATED_S - 42;
+const EARLY_ISO = '2025-11-16T13:32:38Z';
+const updatedEarly = (seconds = EARLY_S): ListEntry => listEntry({ 6: [seconds, 263_669_000] });
+
+test('a summary of an entry updated before it was created starts and ends at [6], and its metadata keeps [5] and [6]', async () => {
+  const record = await summaryOf(updatedEarly());
+  assert.deepEqual(uploaded(record), {
+    name: 'rex-conversation',
+    platform: 'google-ai-mode',
+    identifier: MTID,
+    format_version: 1,
+    is_summary: true,
+    date: EARLY_S * 1000,
+    started: EARLY_ISO,
+    ended: EARLY_ISO,
+    turns: [],
+    metadata: { title_hash: TITLE_HASH, created_at: CREATED_ISO, updated_at: EARLY_ISO, list_numbers: LIST_NUMBERS },
+  });
+  // The redactor rebuilds each time from its seconds.
+  assert.deepEqual([record.started.originalValue, record.ended.originalValue], [`number:${EARLY_S}`, `number:${EARLY_S}`]);
+});
+
+test('a detail of an entry updated before it was created starts and ends at [6] and is dated by [6], and its metadata keeps [5] and [6]', async () => {
+  const record = await detailOf(updatedEarly(), thread(SMALL));
+  const sent = uploaded(record);
+  assert.deepEqual([sent.date, sent.started, sent.ended], [EARLY_S * 1000, EARLY_ISO, EARLY_ISO]);
+  assert.deepEqual(sent.metadata, { title_hash: TITLE_HASH, created_at: CREATED_ISO, updated_at: EARLY_ISO, list_numbers: LIST_NUMBERS, turn_blocks: 2 });
+  assert.deepEqual(Object.keys(record), DETAIL_RECORD_KEYS);
+  assert.deepEqual([record.started.originalValue, record.ended.originalValue], [`number:${EARLY_S}`, `number:${EARLY_S}`]);
+});
+
+test('[6] before [5] by a second or by minutes: started is [6] whatever the gap, and ended stays [6]', async () => {
+  for (const gap of [1, 59, 600, 86_400]) {
+    const entry = updatedEarly(CREATED_S - gap);
+    for (const record of [await summaryOf(entry), await detailOf(entry, thread(SMALL))]) {
+      const what = `${gap} s, is_summary ${String(record.is_summary)}`;
+      assert.equal(record.started.timestamp(), (CREATED_S - gap) * 1000, what);
+      assert.equal(record.ended.timestamp(), (CREATED_S - gap) * 1000, what);
+      assert.equal(record.date, (CREATED_S - gap) * 1000, what);
+      assert.equal(record.metadata.created_at, new DateString(CREATED_S).toJSON(), what);
+    }
+  }
+});
+
+// Less than a millisecond apart, epoch ms cannot tell the two apart; the
+// record still starts at the earlier.
+test('[6] before [5] by less than a millisecond: started is still [6]', async () => {
+  const entry = listEntry({ 5: [CREATED_S + 0.0008, 0], 6: [CREATED_S + 0.0002, 0] });
+  assert.equal(entry.created.timestamp(), entry.updated.timestamp(), 'Test setup invalid: the two times differ in epoch ms');
+  for (const record of [await summaryOf(entry), await detailOf(entry, thread(SMALL))]) {
+    assert.equal(record.started.originalValue, `number:${CREATED_S + 0.0002}`, String(record.is_summary));
+    assert.equal(uploaded(record).started, uploaded(record).ended, String(record.is_summary));
+  }
+});
+
+test('an entry with no [6] starts and ends at [5], summary and detail', async () => {
+  const entry = listEntry({ 6: null });
+  for (const record of [await summaryOf(entry), await detailOf(entry, thread(SMALL))]) {
+    const sent = uploaded(record);
+    assert.deepEqual([sent.date, sent.started, sent.ended], [CREATED_S * 1000, CREATED_ISO, CREATED_ISO], String(record.is_summary));
+    assert.deepEqual([record.started.originalValue, record.ended.originalValue], [`number:${CREATED_S}`, `number:${CREATED_S}`]);
+    assert.deepEqual([record.metadata.created_at, record.metadata.updated_at], [CREATED_ISO, CREATED_ISO]);
+  }
+});
+
+// The 0.4 ms case shares [5]'s epoch ms, so a comparison in ms cannot order
+// the two, and its ISO text (20.0004...Z) sorts before [5]'s (20Z), so a
+// comparison of the text orders them the wrong way.
+test('[6] after [5], by 0.4 ms, a second or the fixture\'s hour, or equal to it: started is [5] and ended [6], as before', async () => {
+  const cases: Array<[string, ListEntry, number]> = [
+    ['an hour after', listEntry(), UPDATED_S],
+    ['a second after', listEntry({ 6: [CREATED_S + 1, 0] }), CREATED_S + 1],
+    ['0.4 ms after', listEntry({ 6: [CREATED_S + 0.0004, 0] }), CREATED_S + 0.0004],
+    ['equal', listEntry({ 6: [CREATED_S, 0] }), CREATED_S],
+  ];
+  const close = cases[2][1];
+  assert.equal(close.created.timestamp(), close.updated.timestamp(), 'Test setup invalid: the 0.4 ms case differs in epoch ms');
+  assert.ok(close.updated.toJSON() < close.created.toJSON(), 'Test setup invalid: the 0.4 ms case\'s text does not sort before [5]\'s');
+  for (const [what, entry, ended] of cases) {
+    const summary = await summaryOf(entry);
+    const detail = await detailOf(entry, thread(SMALL));
+    for (const record of [summary, detail]) {
+      assert.equal(record.started.originalValue, `number:${CREATED_S}`, what);
+      assert.equal(record.ended.originalValue, `number:${ended}`, what);
+      assert.deepEqual([record.metadata.created_at, record.metadata.updated_at], [new DateString(CREATED_S).toJSON(), new DateString(ended).toJSON()], what);
+    }
+    assert.equal(summary.date, new DateString(ended).timestamp(), what);
+    assert.equal(detail.date, CREATED_S * 1000, what);
+  }
+});
+
 test('turn_blocks is the thread\'s block count, which need not be half the turns', async () => {
   const record = await detailOf(listEntry(), thread(SMALL.slice(0, 3), false, 3));
   assert.equal(record.metadata.turn_blocks, 3);
