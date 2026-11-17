@@ -11,7 +11,7 @@
 import type rexCorePlugin from '@bric/rex-core/service-worker';
 
 import { type BackoffState, isBackoffState } from './backoff.mts';
-import { BACKOFF_KEY, MODE_KEY, keyKind, memoKey } from './keys.mts';
+import { BACKOFF_KEY, MODE_KEY, READS_KEY, keyKind, memoKey } from './keys.mts';
 
 export type HandleMessage = typeof rexCorePlugin.handleMessage;
 
@@ -70,6 +70,13 @@ export interface AimStore {
     set(mtid: string, memo: DetailMemo): Promise<Write>;
     clear(mtid: string): Promise<Write>;
   };
+  // The epoch ms at which recent thread reads started, oldest first, which
+  // the read budget counts (budget.mts). The pass writes the whole list, kept
+  // to the budget's count.
+  readonly reads: {
+    get(): Promise<Read<readonly number[]>>;
+    set(times: readonly number[]): Promise<Write>;
+  };
 }
 
 export interface StoreOptions {
@@ -83,6 +90,8 @@ const isCount = (value: unknown): value is number => Number.isSafeInteger(value)
 function isModeRecord(value: unknown): value is ModeRecord {
   return isRecord(value) && (value.mode === 'summary' || value.mode === 'detail') && isCount(value.since);
 }
+
+const isReadTimes = (value: unknown): value is readonly number[] => Array.isArray(value) && value.every(isCount);
 
 function isDetailMemo(value: unknown): value is DetailMemo {
   return isRecord(value) && isCount(value.ended) && isCount(value.at) && isCount(value.retryMs) && (value.retryMs as number) > 0 && isCount(value.failures) && (value.failures as number) > 0;
@@ -162,6 +171,10 @@ export function createStore(handleMessage: HandleMessage, { deadlineMs = STORE_D
     backoff: {
       get: () => typed(BACKOFF_KEY, isBackoffState),
       set: (state) => set(BACKOFF_KEY, state),
+    },
+    reads: {
+      get: () => typed(READS_KEY, isReadTimes),
+      set: (times) => set(READS_KEY, times),
     },
     // async, so that a bad mtid rejects rather than throws.
     memo: {

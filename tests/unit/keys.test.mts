@@ -3,7 +3,7 @@ import { test } from 'node:test';
 
 import { DateString } from '@bric/rex-types/types';
 
-import { BACKOFF_KEY, MODE_KEY, keyKind, legacyKeyId, memoKey, uploadKeyId } from '../../src/keys.mts';
+import { BACKOFF_KEY, MODE_KEY, READS_KEY, keyKind, legacyKeyId, memoKey, uploadKeyId } from '../../src/keys.mts';
 import { type ListEntry, parseListPage } from '../../src/list.mts';
 
 // Synthetic ids in the captured forms: an mtid of 22 characters, an mstk of
@@ -77,9 +77,10 @@ test('a thread with no update time keeps the old key too: the time is the creati
   assert.equal(transmitted(legacyKeyId(entry), entry.updated), old);
 });
 
-test('the mode record, the back-off and the memos sit under the spider\'s namespace', () => {
+test('the mode record, the back-off, the read times and the memos sit under the spider\'s namespace', () => {
   assert.equal(MODE_KEY, 'rex-spider-google-ai-mode');
   assert.equal(BACKOFF_KEY, 'rex-spider-google-ai-backoff');
+  assert.equal(READS_KEY, 'rex-spider-google-ai-read-times');
   assert.equal(memoKey(MTID), `rex-spider-google-ai-detail-memo-${MTID}`);
 });
 
@@ -100,6 +101,7 @@ test('an id that is not a string is refused at run time too', () => {
 test('what may be logged of a key is its kind, never a thread id', () => {
   assert.equal(keyKind(MODE_KEY), 'rex-spider-google-ai-mode');
   assert.equal(keyKind(BACKOFF_KEY), 'rex-spider-google-ai-backoff');
+  assert.equal(keyKind(READS_KEY), 'rex-spider-google-ai-read-times');
   assert.equal(keyKind(memoKey(MTID)), 'rex-spider-google-ai-detail-memo');
   assert.equal(keyKind(`rex-spider-google-ai-conversation-upload-${MTID}-1763303600000`), 'other key');
   assert.equal(keyKind(`rex-spider-google-ai-conversation-upload-${MSTK}_${MTID}-1763303600000`), 'other key');

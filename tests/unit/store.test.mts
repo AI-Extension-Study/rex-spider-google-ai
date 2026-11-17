@@ -162,6 +162,28 @@ test('the back-off reads back as written, clearing it writes null, and anything 
   assert.deepEqual(await store.backoff.get(), { value: null, unanswered: false, malformed: true });
 });
 
+test('the read times read back as written, and anything else stored there reads as absent and malformed', async () => {
+  const core = rexCore();
+  const store = createStore(core.handleMessage, { log: quiet });
+  assert.deepEqual(await store.reads.get(), { value: null, unanswered: false, malformed: false });
+  const times = [1700000000000, 1700000060000];
+  assert.deepEqual(await store.reads.set(times), { ok: true, unanswered: false });
+  assert.deepEqual(core.values.get('rex-spider-google-ai-read-times'), times);
+  assert.deepEqual(await store.reads.get(), { value: times, unanswered: false, malformed: false });
+  assert.deepEqual(await store.reads.set([]), { ok: true, unanswered: false });
+  assert.deepEqual(await store.reads.get(), { value: [], unanswered: false, malformed: false });
+  for (const bad of [[1700000000000, 'x'], [-1], [1.5], [Number.NaN], [null], { 0: 1700000000000, length: 1 }, 1700000000000, 'x']) {
+    core.values.set('rex-spider-google-ai-read-times', bad);
+    assert.deepEqual(await store.reads.get(), { value: null, unanswered: false, malformed: true }, JSON.stringify(bad));
+  }
+});
+
+test('read times that get no answer are flagged, and a write of them that gets none is not ok', { timeout: 2000 }, async () => {
+  const store = createStore(rexCore({ open: false }).handleMessage, { deadlineMs: 50, log: quiet });
+  assert.deepEqual(await store.reads.get(), { value: null, unanswered: true, malformed: false });
+  assert.deepEqual(await store.reads.set([1700000000000]), { ok: false, unanswered: true });
+});
+
 test('a back-off that gets no answer is flagged, and counts as none', { timeout: 2000 }, async () => {
   const store = createStore(rexCore({ open: false }).handleMessage, { deadlineMs: 50, log: quiet });
   assert.deepEqual(await store.backoff.get(), { value: null, unanswered: true, malformed: false });

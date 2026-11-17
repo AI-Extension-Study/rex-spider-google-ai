@@ -38,6 +38,10 @@ export const MODE_KEY = `${KEY_PREFIX}mode`;
 // (backoff.mts, BackoffState).
 export const BACKOFF_KEY = `${KEY_PREFIX}backoff`;
 
+// When the last thread reads started, which the read budget counts
+// (budget.mts; store.mts, AimStore's reads).
+export const READS_KEY = `${KEY_PREFIX}read-times`;
+
 const MEMO_PREFIX = `${KEY_PREFIX}detail-memo-`;
 
 // One thread's memo of a failed detail read (store.mts, DetailMemo).
@@ -48,7 +52,7 @@ export function memoKey(mtid: string): string {
 // The part of a key that may be logged: its kind. A memo key carries a thread
 // id, and a key this module does not own is not echoed at all.
 export function keyKind(key: string): string {
-  if (key === MODE_KEY || key === BACKOFF_KEY) {
+  if (key === MODE_KEY || key === BACKOFF_KEY || key === READS_KEY) {
     return key;
   }
   if (key.startsWith(MEMO_PREFIX)) {
