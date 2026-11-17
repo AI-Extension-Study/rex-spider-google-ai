@@ -13,12 +13,15 @@
 // it runs out; that thread gets nothing and is read after it. A home page
 // without SignOutOptions, a 401 anywhere, or a list that comes back empty
 // after a cursor ends the pass as not signed in, with no back-off. A read
-// that finds no thread values on the page checks the home page once more,
-// and ends the pass so too if the home page has no SignOutOptions. Any other
-// failed read is that thread's alone: its summary goes out in the detail's
-// place unless one went out at that time, and a memo holds it back for a
-// day, or a week when the failure will not pass by itself. Three such in a
-// row end the pass, or the first with halt_on_error.
+// whose page lacks a thread value checks the home page once more, and ends
+// the pass so too if the home page has no SignOutOptions. A page with none of
+// the five values is Google's limited page, its answer to too many reads:
+// after that home check it stops the pass with a back-off of its own, and
+// its thread gets nothing, as after a 429. Any other failed read is that
+// thread's alone: its summary goes out in the detail's place unless one went
+// out at that time, and a memo holds it back for a day, or a week when the
+// failure will not pass by itself. Three such in a row end the pass, or the
+// first with halt_on_error.
 import type { DateString } from '@bric/rex-types/types';
 
 import { type BackoffCode, type BackoffState, backoffDecision, nextBackoff } from './backoff.mts';
@@ -89,8 +92,9 @@ export const RETRY_LATE_MS = 7 * DAY_MS;
 
 // The failures that may pass by themselves, as on the ChatGPT crawler: no
 // answer, a 5xx (or a redirect that was not followed), and a 2xx that is not
-// what was asked for, as an interstitial would be: a page without the thread
-// values (layout) or a folwr body that is not a whole stream of chunks. A
+// what was asked for, as an interstitial would be: a page that lacks a thread
+// value or holds one out of form (layout) or a folwr body that is not a whole
+// stream of chunks. The limited page writes no memo and is not here. A
 // refusal (a 403, a 404), a body over the cap, which a thread only grows
 // past, and a thread that cannot be built into a record wait for a change.
 const MAY_PASS: ReadonlySet<string> = new Set(['network', 'server', 'layout', 'stream']);
@@ -178,8 +182,8 @@ interface Pass {
   // The back-off as the pass found it, null when there was none or it could
   // not be read.
   backoff: BackoffState | null;
-  // The pass's refusal, which sets the back-off; at most one, since it stops
-  // the pass.
+  // The pass's refusal or limited page, which sets the back-off; at most
+  // one, since it stops the pass.
   refusal: { readonly code: BackoffCode; readonly retryAfterMs: number | null } | null;
   // List pages answered in full, which with no refusal clear the back-off.
   pagesRead: number;
@@ -386,12 +390,13 @@ async function readDetail(pass: Pass, entry: ListEntry): Promise<DetailRead> {
   }
 }
 
-type HomeCheck = { readonly kind: 'signed-in' | 'signed-out' | 'unknown' } | { readonly kind: 'refused'; readonly code: BackoffCode };
+type HomeCheck = { readonly kind: 'signed-in' | 'signed-out' | 'unknown' } | { readonly kind: 'refused'; readonly code: 'rate-limited' | 'challenge' };
 
-// The home page once more, after a read that found no thread values: a
-// signed-out session's thread page lacks them too. A refusal sets the
-// back-off as anywhere else. An answer that cannot say either way (no
-// answer, another status) lets the failure count.
+// The home page once more, after a read whose page lacked a thread value or
+// all five: a signed-out session's thread page lacks them too. A refusal
+// sets the back-off as anywhere else. An answer that cannot say either way
+// (no answer, another status) lets a layout failure count, and a limited
+// page stop the pass.
 async function checkHome(pass: Pass): Promise<HomeCheck> {
   await beforeRequest(pass);
   let home: Answer;
@@ -530,7 +535,7 @@ async function sendDetails(pass: Pass, due: readonly ListEntry[]): Promise<Sendi
         stop = 'not-signed-in';
         break;
       }
-      if (read.why === 'layout') {
+      if (read.why === 'layout' || read.why === 'limited') {
         const home = await checkHome(pass);
         if (home.kind === 'signed-out') {
           pass.say('the home page holds no SignOutOptions after a read that found no thread values; the user is not signed in');
@@ -542,6 +547,15 @@ async function sendDetails(pass: Pass, due: readonly ListEntry[]): Promise<Sendi
           stop = home.code;
           break;
         }
+      }
+      if (read.why === 'limited') {
+        // Google's limited page: this thread gets nothing now, neither a
+        // summary nor a memo, and does not count as a failed read; it is read
+        // after the back-off.
+        pass.refusal = { code: 'limited', retryAfterMs: null };
+        pass.say('a thread page held none of the thread values, as Google\'s limited page; the threads not read are read after the back-off');
+        stop = 'limited';
+        break;
       }
       failed += 1;
       inARow += 1;

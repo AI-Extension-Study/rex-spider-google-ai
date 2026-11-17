@@ -13,7 +13,7 @@ import { type AimRecord, buildDetailRecord, buildSummaryRecord } from '../../src
 import type { DetailMemo, ModeRecord, Read, Write } from '../../src/store.mts';
 import { FOLWR_TEXT_CAP } from '../../src/stream.mts';
 import { MARKERS, TITLE, TITLE_HASH, rawEntry } from './fixtures.mts';
-import { threadPage, threadStream } from './thread-fixtures.mts';
+import { limitedPage, threadPage, threadStream } from './thread-fixtures.mts';
 
 type Json = Record<string, unknown>;
 
@@ -1207,6 +1207,108 @@ test('halt_on_error is read before each thread: served during the reads, it ends
   const run = await pass(web, rexSpider({ halt: () => web.folwrCount() >= 2 }));
   assert.deepEqual(readsOf(run.events), [1, 2, 3]);
   assert.equal(withoutMs(run.outcome.reason), 'ok seen=4 dispatched=3 failed=2 left=1 stop=halt-on-error');
+});
+
+// ---- Google's limited page ----
+//
+// After about 40 requests Google answers the thread page with a limited
+// page: a 200 search page that holds none of the five values (read.mts).
+
+const LIMITED = ok(limitedPage());
+
+test('a limited thread page stops the pass as limited after the home check: a 60-minute back-off, no summary, no memo, and the thread left for a later pass', async () => {
+  const pages = [[thread(1, 1), thread(2, 2), thread(3, 3)]];
+  const side = rexSpider({ halt: false });
+  const core = rexCore();
+  const run = await pass(site({ pages, threadPages: { 2: LIMITED } }), side, { core });
+  assert.deepEqual(run.events, [
+    'GET home', 'wait 30000', 'GET list 0',
+    'wait 30000', 'GET page 1', 'wait 30000', 'GET folwr 1', 'dispatch 1',
+    'wait 30000', 'stamp 1-detail', 'GET page 2', 'wait 30000', 'GET home',
+  ]);
+  assert.deepEqual(kindsOf(run.sent), [['1', false]]);
+  assert.deepEqual(side.stamps, [keyOf(1, 1, 'detail')]);
+  assert.deepEqual(core.memoWrites, []);
+  const stored = core.held.backoff as BackoffState;
+  assert.deepEqual(core.backoffWrites, [{ until: run.clock() + 60 * MINUTE, failures: 1, code: 'limited' }]);
+  assert.equal(withoutMs(run.outcome.reason), 'ok seen=3 dispatched=1 left=2 stop=limited');
+  // A minute later the pass is skipped with no request and no store call but the back-off's.
+  const skipped = site({ pages });
+  const next = await pass(skipped, side, { core, now: run.clock() + MINUTE });
+  assert.deepEqual(skipped.requests, []);
+  assert.deepEqual(next.trace.filter((entry) => REX_CORE_CALL.test(entry)), ['backoff get']);
+  assert.deepEqual(next.outcome, { count: -1, ids: [], reason: `backoff until=${new Date(stored.until).toISOString()} code=limited` });
+  // Once it has run out, thread 2 is read with the one not reached, and the clean pass clears the back-off.
+  const after = await pass(site({ pages }), side, { core, now: stored.until });
+  assert.deepEqual(readsOf(after.events), [2, 3]);
+  assert.deepEqual(kindsOf(after.sent), [['2', false], ['3', false]]);
+  assert.deepEqual(core.backoffWrites, [stored, null]);
+});
+
+test('each limited page in a row doubles the wait from 60 minutes, to at most 6 hours, and no pass sends or memos anything', async () => {
+  const core = rexCore();
+  const side = rexSpider({ halt: false });
+  const waits: number[] = [];
+  let now = NOW;
+  for (let round = 0; round < 5; round += 1) {
+    const run = await pass(site({ pages: [[thread(1, 1)]], threadPages: { 1: LIMITED } }), side, { core, now });
+    assert.deepEqual(requestsOf(run.events), ['home', 'list 0', 'page 1', 'home'], `round ${round}`);
+    assert.equal(withoutMs(run.outcome.reason), 'ok seen=1 dispatched=0 left=1 stop=limited', `round ${round}`);
+    const state = core.held.backoff as BackoffState;
+    assert.deepEqual([state.code, state.failures], ['limited', round + 1]);
+    waits.push((state.until - run.clock()) / MINUTE);
+    now = state.until;
+  }
+  assert.deepEqual(waits, [60, 120, 240, 360, 360]);
+  assert.deepEqual([core.memoWrites, side.stamps], [[], []]);
+});
+
+test('a limited page whose home check says signed out ends the pass as not signed in, and one whose check is refused stops it with that refusal\'s back-off', async () => {
+  const cases: [Answer, string, string | null][] = [
+    [SIGNED_OUT, 'not-signed-in', null],
+    [failing(401), 'not-signed-in', null],
+    [SORRY, 'challenge', 'challenge'],
+    [failing(429), 'rate-limited', 'rate-limited'],
+  ];
+  for (const [check, stop, code] of cases) {
+    const core = rexCore();
+    const run = await pass(site({ pages: [[thread(1, 1), thread(2, 2)]], home: (nth) => (nth === 1 ? SIGNED_IN : check), threadPages: { 1: LIMITED } }), rexSpider({ halt: false }), { core });
+    assert.deepEqual(requestsOf(run.events), ['home', 'list 0', 'page 1', 'home'], stop);
+    assert.deepEqual([run.sent, core.memoWrites], [[], []], stop);
+    assert.deepEqual(core.backoffWrites.map((state) => [state?.code, state === null ? null : (state.until - run.clock()) / MINUTE]), code === null ? [] : [[code, 5]], stop);
+    assert.equal(withoutMs(run.outcome.reason), `ok seen=2 dispatched=0 left=2 stop=${stop}`);
+  }
+});
+
+test('a limited page stops the pass even when the home check cannot tell (a 500, no answer)', async () => {
+  const homes: Reply[] = [
+    (nth) => (nth === 1 ? SIGNED_IN : failing(500)),
+    (nth) => {
+      if (nth === 1) return SIGNED_IN;
+      throw new RequestError('network');
+    },
+  ];
+  for (const home of homes) {
+    const core = rexCore();
+    const run = await pass(site({ home, pages: [[thread(1, 1), thread(2, 2)]], threadPages: { 1: LIMITED } }), rexSpider({ halt: false }), { core });
+    assert.deepEqual(requestsOf(run.events), ['home', 'list 0', 'page 1', 'home']);
+    assert.deepEqual([run.sent, core.memoWrites], [[], []]);
+    assert.deepEqual(core.backoffWrites.map((state) => state?.code), ['limited']);
+    assert.equal(withoutMs(run.outcome.reason), 'ok seen=2 dispatched=0 left=2 stop=limited');
+  }
+});
+
+test('a limited page neither counts in the run of failed reads nor ends one as halt_on_error would', async () => {
+  const pages = [[1, 2, 3, 4].map((n) => thread(n, n))];
+  const core = rexCore();
+  const run = await pass(site({ pages, folwrs: { 1: failing(500), 2: failing(500) }, threadPages: { 3: LIMITED } }), rexSpider({ halt: false }), { core });
+  assert.deepEqual(requestsOf(run.events).slice(2), ['page 1', 'folwr 1', 'page 2', 'folwr 2', 'page 3', 'home']);
+  assert.deepEqual(kindsOf(run.sent), [['1', true], ['2', true]]);
+  assert.deepEqual(core.memoWrites.map(([id]) => short(id)), ['1', '2']);
+  assert.equal(withoutMs(run.outcome.reason), 'ok seen=4 dispatched=2 failed=2 left=2 stop=limited');
+  const halting = await pass(site({ pages, threadPages: { 1: LIMITED } }), rexSpider({ halt: true }));
+  assert.deepEqual(halting.sent, []);
+  assert.equal(withoutMs(halting.outcome.reason), 'ok seen=4 dispatched=0 left=4 stop=limited');
 });
 
 // ---- the back-off ----

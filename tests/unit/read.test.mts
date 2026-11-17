@@ -6,7 +6,7 @@ import { type FolwrValues, type ReadResult, folwrUrl, folwrValues, readThread, t
 import { FOLWR_TEXT_CAP } from '../../src/stream.mts';
 import { parseTurns } from '../../src/turns.mts';
 import { MSTK, MTID, listEntry } from './fixtures.mts';
-import { FOLWR_VALUES, type PageValues, fillFrame, threadHtml, threadPage, threadStream } from './thread-fixtures.mts';
+import { FOLWR_VALUES, type PageValues, fillFrame, limitedPage, threadHtml, threadPage, threadStream } from './thread-fixtures.mts';
 
 const PAGE_URL = `https://www.google.com/search?udm=50&mstk=${MSTK}&mtid=${MTID}&csuir=1&hl=en`;
 // URLSearchParams writes ':' as %3A and ',' as %2C; the other values are
@@ -153,6 +153,59 @@ for (const key of Object.keys(FOLWR_VALUES) as (keyof FolwrValues)[]) {
   });
 }
 
+// Google's limited page holds none of the five, not even out of form, and is
+// Google's answer to too many reads rather than a changed layout: the pass
+// stops on it with a back-off (pass.mts). Any one of the five, in any form,
+// keeps a page a layout failure.
+const NONE: PageValues = { garc: null, mlro: null, mlros: null, xsrf: null, ei: null };
+
+test('a thread page with none of the five values is limited, after one request and no pace()', async () => {
+  const pages: [string, string][] = [
+    ['the limited page', limitedPage()],
+    ['a thread page without the five', threadPage(NONE)],
+    ['another page', '<!doctype html><html><body>Made-up search page</body></html>'],
+    ['an empty body', ''],
+  ];
+  for (const [name, text] of pages) {
+    const { result, events } = await read([answer(200, text)]);
+    assert.deepEqual(result, { ok: false, failure: 'limited', answer: null }, name);
+    assert.deepEqual(events, [`get ${PAGE_URL}`], name);
+  }
+});
+
+for (const key of Object.keys(FOLWR_VALUES) as (keyof FolwrValues)[]) {
+  test(`a thread page with only ${key}, in or out of form, is a layout failure, not limited`, async () => {
+    for (const value of [FOLWR_VALUES[key], '', 'Made.up value&amp;']) {
+      const { result } = await read([answer(200, threadPage({ ...NONE, [key]: value }))]);
+      assert.deepEqual(result, { ok: false, failure: 'layout', answer: null }, `${key} ${JSON.stringify(value)}`);
+    }
+  });
+}
+
+test('a value written with other quotes, none, or spaces around its = or : still counts as present', async () => {
+  const base = threadPage(NONE);
+  assert.ok(base.includes(' data-srtst=') && base.includes('kEXPI:'), 'Test setup invalid: no place to add a value');
+  const pages = [
+    base.replace(' data-srtst=', ' data-garc=GarcUnquoted data-srtst='),
+    base.replace(' data-srtst=', " data-lro-token='MlroSingle' data-srtst="),
+    base.replace(' data-srtst=', ' data-lro-signature = "SigSpaced" data-srtst='),
+    base.replace(' data-srtst=', '\ndata-xsrf-folwr-token="Xsrf:1" data-srtst='),
+    base.replace('kEXPI:', 'kEI:"EiDouble",kEXPI:'),
+    base.replace('kEXPI:', "kEI : 'EiSpaced',kEXPI:"),
+  ];
+  for (const text of pages) {
+    assert.deepEqual((await read([answer(200, text)])).result, { ok: false, failure: 'layout', answer: null }, text.slice(-160));
+  }
+});
+
+test('a near miss of a value\'s name is not one of the five: data-ei, the folif token, kEXPI and longer attribute names leave a page limited', async () => {
+  const page = threadPage(NONE).replace(' data-srtst=', ' data-old-data-garc="Other0123" data-xsrf-folwr-token-old="Other0123" data-lro-tokens="Other0123" data-srtst=');
+  for (const near of ['data-ei="', 'data-xsrf-folif-token="', 'kEXPI:\'', 'data-old-data-garc="', 'data-xsrf-folwr-token-old="', 'data-lro-tokens="']) {
+    assert.ok(page.includes(near), `Test setup invalid: no ${near}`);
+  }
+  assert.deepEqual((await read([answer(200, page)])).result, { ok: false, failure: 'limited', answer: null });
+});
+
 const BROKEN: [string, string][] = [
   ['an empty body', ''],
   ['a body without the guard', '<!doctype html><html><body>Made-up</body></html>'],
@@ -232,6 +285,7 @@ test('readThread logs nothing', async (t) => {
   const calls = (['log', 'info', 'warn', 'error', 'debug'] as const).map((name) => t.mock.method(console, name, () => {}));
   await read([PAGE, STREAM]);
   await read([answer(200, threadPage({ garc: null }))]);
+  await read([answer(200, limitedPage())]);
   await read([PAGE, answer(200, 'broken')]);
   await read([new RequestError('timeout')]);
   await read([answer(429, '')]);
