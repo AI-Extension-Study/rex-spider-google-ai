@@ -1400,6 +1400,24 @@ test('a read\'s time is stored just before its page request, so a read that fail
   assert.equal(withoutMs(run.outcome.reason), 'ok seen=2 dispatched=2 failed=1');
 });
 
+// The enabled and mode check comes after the wait before a read, and the read
+// is spent only after it, so a read that is never made is never counted.
+test('a switch-off or another mode served in the wait before a read stores no read time', async () => {
+  const pages = [[1, 2, 3].map((n) => thread(n, n))];
+  const off = site({ pages });
+  const offCore = rexCore();
+  const switched = await pass(off, rexSpider({ enabled: () => off.folwrCount() < 2 }), { core: offCore });
+  assert.deepEqual(readsOf(switched.events), [1, 2]);
+  assert.equal(offCore.readsWrites.length, 2, 'switch-off');
+  assert.equal(withoutMs(switched.outcome.reason), 'ok seen=3 dispatched=2 left=1 stop=disabled');
+  const moded = site({ pages });
+  const modeCore = rexCore();
+  const changed = await pass(moded, rexSpider({ summarize: () => moded.folwrCount() >= 2 }), { core: modeCore });
+  assert.deepEqual(readsOf(changed.events), [1, 2]);
+  assert.equal(modeCore.readsWrites.length, 2, 'mode');
+  assert.equal(withoutMs(changed.outcome.reason), 'ok seen=3 dispatched=2 left=1 stop=mode');
+});
+
 test('the stored times keep the newest 15, and a time more than a day ahead is dropped and not counted, while one less ahead counts', async () => {
   const older = Array.from({ length: 16 }, (_, k) => NOW - 2 * HOUR - k * MINUTE);
   const core = rexCore({ reads: [NOW + 2 * DAY, ...older] });
