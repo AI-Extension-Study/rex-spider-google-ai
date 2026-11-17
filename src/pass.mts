@@ -13,15 +13,22 @@
 // it runs out; that thread gets nothing and is read after it. A home page
 // without SignOutOptions, a 401 anywhere, or a list that comes back empty
 // after a cursor ends the pass as not signed in, with no back-off. A read
-// that finds no thread values on the page checks the home page once more,
-// and ends the pass so too if the home page has no SignOutOptions. Any other
-// failed read is that thread's alone: its summary goes out in the detail's
-// place unless one went out at that time, and a memo holds it back for a
-// day, or a week when the failure will not pass by itself. Three such in a
-// row end the pass, or the first with halt_on_error.
+// whose page lacks a thread value checks the home page once more, and ends
+// the pass so too if the home page has no SignOutOptions. A page with none of
+// the four data- attributes that carry the thread values is Google's limited
+// page, its answer to too many reads: after that home check it stops the
+// pass with a back-off of its own, kept even if a switch-off ends the pass
+// in the check's wait, and its thread gets nothing, as after a 429. Any
+// other failed read is that thread's alone: its summary goes out in the
+// detail's place unless one went out at that time, and a memo holds it back
+// for a day, or a week when the failure will not pass by itself. Three such
+// in a row end the pass, or the first with halt_on_error. A detail pass
+// reads at most the read budget's threads in any hour, counted across passes
+// in the store (budget.mts), and stops once the hour's reads reach it.
 import type { DateString } from '@bric/rex-types/types';
 
 import { type BackoffCode, type BackoffState, backoffDecision, nextBackoff } from './backoff.mts';
+import { READ_BUDGET, type ReadBudget, readsInWindow, withRead } from './budget.mts';
 import { type Answer, type Client, RequestError, classify, retryAfterMs } from './client.mts';
 import { HOME_URL, isSignedIn } from './home.mts';
 import { uploadKeyId } from './keys.mts';
@@ -75,9 +82,11 @@ export interface PassLimits {
   // Failed thread reads in a row that end a pass without halt_on_error: past
   // a few, the reads are failing for a reason the next threads share.
   readonly failedRun: number;
+  // Thread reads in any window, across passes (budget.mts).
+  readonly readBudget: ReadBudget;
 }
 
-export const PASS_LIMITS: PassLimits = { settleMs: 3000, batch: 25, storeMs: 20_000, hashMs: 1000, detailBudgetMs: 360_000, failedRun: 3 };
+export const PASS_LIMITS: PassLimits = { settleMs: 3000, batch: 25, storeMs: 20_000, hashMs: 1000, detailBudgetMs: 360_000, failedRun: 3, readBudget: READ_BUDGET };
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -89,8 +98,9 @@ export const RETRY_LATE_MS = 7 * DAY_MS;
 
 // The failures that may pass by themselves, as on the ChatGPT crawler: no
 // answer, a 5xx (or a redirect that was not followed), and a 2xx that is not
-// what was asked for, as an interstitial would be: a page without the thread
-// values (layout) or a folwr body that is not a whole stream of chunks. A
+// what was asked for, as an interstitial would be: a page that lacks a thread
+// value or holds one out of form (layout) or a folwr body that is not a whole
+// stream of chunks. The limited page writes no memo and is not here. A
 // refusal (a 403, a 404), a body over the cap, which a thread only grows
 // past, and a thread that cannot be built into a record wait for a change.
 const MAY_PASS: ReadonlySet<string> = new Set(['network', 'server', 'layout', 'stream']);
@@ -107,8 +117,9 @@ export interface PassDeps {
   readonly client: Client;
   readonly framework: PassFramework;
   // rex-core's store, for the mode record (mode.mts), the back-off
-  // (backoff.mts) and the memos of failed reads.
-  readonly store: Pick<AimStore, 'mode' | 'backoff' | 'memo'>;
+  // (backoff.mts), the memos of failed reads and the read times
+  // (budget.mts).
+  readonly store: Pick<AimStore, 'mode' | 'backoff' | 'memo' | 'reads'>;
   readonly dispatch: (record: AimRecord) => void;
   // Every wait of the pass, in chunks of at most 20 s with a keep-alive call
   // before each (pacing.mts).
@@ -178,8 +189,8 @@ interface Pass {
   // The back-off as the pass found it, null when there was none or it could
   // not be read.
   backoff: BackoffState | null;
-  // The pass's refusal, which sets the back-off; at most one, since it stops
-  // the pass.
+  // The pass's refusal or limited page, which sets the back-off; at most
+  // one, since it stops the pass.
   refusal: { readonly code: BackoffCode; readonly retryAfterMs: number | null } | null;
   // List pages answered in full, which with no refusal clear the back-off.
   pagesRead: number;
@@ -386,12 +397,13 @@ async function readDetail(pass: Pass, entry: ListEntry): Promise<DetailRead> {
   }
 }
 
-type HomeCheck = { readonly kind: 'signed-in' | 'signed-out' | 'unknown' } | { readonly kind: 'refused'; readonly code: BackoffCode };
+type HomeCheck = { readonly kind: 'signed-in' | 'signed-out' | 'unknown' } | { readonly kind: 'refused'; readonly code: 'rate-limited' | 'challenge' };
 
-// The home page once more, after a read that found no thread values: a
-// signed-out session's thread page lacks them too. A refusal sets the
-// back-off as anywhere else. An answer that cannot say either way (no
-// answer, another status) lets the failure count.
+// The home page once more, after a read whose page lacked a thread value or
+// all five: a signed-out session's thread page lacks them too. A refusal
+// sets the back-off as anywhere else. An answer that cannot say either way
+// (no answer, another status) lets a layout failure count, and a limited
+// page stop the pass.
 async function checkHome(pass: Pass): Promise<HomeCheck> {
   await beforeRequest(pass);
   let home: Answer;
@@ -414,6 +426,41 @@ async function checkHome(pass: Pass): Promise<HomeCheck> {
   }
   pass.say(`the home page check failed (status ${home.status}); the read counts as failed`);
   return { kind: 'unknown' };
+}
+
+// The read budget, asked just before a thread's page request: spent when the
+// reads stored in its window have reached its count; store when the times
+// got no answer or the new one was not kept, since no read is made without
+// its time stored first; ok once this read's time is stored. A read counts
+// from its page request, whatever comes of it. Times of another form read as
+// none, and this read's time replaces them.
+async function spendRead(pass: Pass): Promise<'ok' | 'spent' | 'store'> {
+  const budget = pass.limits.readBudget;
+  let times: readonly number[];
+  try {
+    const read = await stored(pass, () => pass.deps.store.reads.get());
+    if (read.unanswered) {
+      throw new StoreSilent();
+    }
+    times = read.value ?? [];
+  } catch {
+    pass.say('the read times got no answer; the reads stop for this pass');
+    return 'store';
+  }
+  const now = pass.now();
+  if (readsInWindow(times, now, budget) >= budget.reads) {
+    pass.say('the read budget is spent; the threads not read are read in a later pass');
+    return 'spent';
+  }
+  try {
+    if ((await stored(pass, () => pass.deps.store.reads.set(withRead(times, now, budget)))).ok) {
+      return 'ok';
+    }
+  } catch {
+    // Said below.
+  }
+  pass.say('a read time was not kept; the reads stop for this pass');
+  return 'store';
 }
 
 // A write that waits for the wait before the next read, as a record waits to
@@ -499,6 +546,11 @@ async function sendDetails(pass: Pass, due: readonly ListEntry[]): Promise<Sendi
       }
       // halt_on_error as served now, for this thread's read.
       const halts = !framework.continueAfterError();
+      const spend = await spendRead(pass);
+      if (spend !== 'ok') {
+        stop = spend === 'spent' ? 'read-budget' : 'store';
+        break;
+      }
       const read = await readDetail(pass, entry);
       if (read.kind === 'record') {
         inARow = 0;
@@ -530,9 +582,18 @@ async function sendDetails(pass: Pass, due: readonly ListEntry[]): Promise<Sendi
         stop = 'not-signed-in';
         break;
       }
-      if (read.why === 'layout') {
+      if (read.why === 'limited') {
+        // Google's limited page: the back-off is set before the home check,
+        // so a switch-off or a throw in its wait still stores it, and the
+        // next enabled pass does not request into the limit. A refusal there
+        // replaces it, and a signed-out home page clears it.
+        pass.refusal = { code: 'limited', retryAfterMs: null };
+      }
+      if (read.why === 'layout' || read.why === 'limited') {
         const home = await checkHome(pass);
         if (home.kind === 'signed-out') {
+          // A signed-out session's thread page, not Google's limit.
+          pass.refusal = null;
           pass.say('the home page holds no SignOutOptions after a read that found no thread values; the user is not signed in');
           stop = 'not-signed-in';
           break;
@@ -542,6 +603,13 @@ async function sendDetails(pass: Pass, due: readonly ListEntry[]): Promise<Sendi
           stop = home.code;
           break;
         }
+      }
+      if (read.why === 'limited') {
+        // This thread gets nothing now, neither a summary nor a memo, and does
+        // not count as a failed read; it is read after the back-off.
+        pass.say('a thread page held none of the thread value attributes, as Google\'s limited page; the threads not read are read after the back-off');
+        stop = 'limited';
+        break;
       }
       failed += 1;
       inARow += 1;

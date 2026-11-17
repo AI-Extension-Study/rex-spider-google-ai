@@ -246,3 +246,15 @@ export function threadPage(values: PageValues = {}): string {
     + `<div data-ei="${EI}"${attr('data-garc', v.garc)}${attr('data-lro-signature', v.mlros)}${attr('data-lro-token', v.mlro)} data-srtst="made-up-srtst" data-xsrf-folif-token="FolifToken-made-up:1763300000000"${attr('data-xsrf-folwr-token', v.xsrf)}></div>`
     + '<a href="https://accounts.google.com/SignOutOptions?made-up">Made-up account</a></div></body></html>';
 }
+
+// Google's limited thread page, made up: what it answers a crawler that has
+// read too many threads, a 200 search page that holds none of the five
+// values and none of the four data- attributes that carry four of them. It
+// keeps near misses of their names (data-ei, the folif token), which must not
+// count as one of them.
+export function limitedPage(): string {
+  return '<!doctype html><html lang="en"><head><title>Made-up - Google Search</title>'
+    + `<script nonce="made-up">(function(){window.google={kEXPI:'0,made-up',u:'made-up'};})();</script></head>`
+    + `<body><div class="made-up" data-ei="${EI}" data-xsrf-folif-token="FolifToken-made-up:1763300000000">SITE-TEXT a made-up limited page</div>`
+    + '<a href="https://accounts.google.com/SignOutOptions?made-up">Made-up account</a></body></html>';
+}

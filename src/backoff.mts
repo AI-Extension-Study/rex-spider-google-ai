@@ -5,18 +5,23 @@
 // to how it ended.
 
 export const BACKOFF_BASE_MS = 5 * 60_000;
+// Google's limited thread page lasted about 40 minutes with no other Google
+// page loaded (live runs, 2026-11-17), so its first wait is an hour.
+export const LIMITED_BACKOFF_MS = 3_600_000;
 export const BACKOFF_CAP_MS = 6 * 60 * 60_000;
 
 // What asked for the wait: a 429, a 503 or a Retry-After, or a redirect to
-// Google's unusual-traffic page (/sorry/). The same names as client.mts's
-// classify. Reported on each skipped pass.
-export const BACKOFF_CODES = ['rate-limited', 'challenge'] as const;
+// Google's unusual-traffic page (/sorry/), by the same names as client.mts's
+// classify; or a thread page that holds none of the four data- attributes
+// that carry the thread values, Google's limited page (read.mts). Reported
+// on each skipped pass.
+export const BACKOFF_CODES = ['rate-limited', 'challenge', 'limited'] as const;
 export type BackoffCode = (typeof BACKOFF_CODES)[number];
 
 export interface BackoffState {
   // Epoch ms before which a pass is skipped.
   readonly until: number;
-  // Refusals in a row; the wait doubles with each.
+  // Refusals in a row, whatever asked for each; the wait doubles with each.
   readonly failures: number;
   readonly code: BackoffCode;
 }
@@ -34,8 +39,9 @@ export type BackoffEvent =
 
 export type BackoffDecision = { readonly skip: true; readonly until: number; readonly code: BackoffCode } | { readonly skip: false };
 
-// 5, 10, 20, ... minutes; nextBackoff applies the cap.
-const scheduledMs = (failures: number): number => BACKOFF_BASE_MS * 2 ** (failures - 1);
+// 5, 10, 20, ... minutes, or 60, 120, 240, ... for the limited page, from the
+// base of the code that asks; nextBackoff applies the cap.
+const scheduledMs = (failures: number, code: BackoffCode): number => (code === 'limited' ? LIMITED_BACKOFF_MS : BACKOFF_BASE_MS) * 2 ** (failures - 1);
 
 // The state after a pass: null once a pass has read a list page with no
 // refusal, a longer wait after one that was refused.
@@ -48,7 +54,7 @@ export function nextBackoff(previous: BackoffState | null, event: BackoffEvent):
   const askedMs = typeof asked === 'number' && Number.isFinite(asked) && asked > 0 ? asked : 0;
   // The header lengthens a wait but never shortens the schedule, and the cap
   // bounds both, so a bogus header cannot park the spider for days.
-  return { until: event.now + Math.min(Math.max(scheduledMs(failures), askedMs), BACKOFF_CAP_MS), failures, code: event.code };
+  return { until: event.now + Math.min(Math.max(scheduledMs(failures, event.code), askedMs), BACKOFF_CAP_MS), failures, code: event.code };
 }
 
 export function backoffDecision(state: BackoffState | null, now: number): BackoffDecision {

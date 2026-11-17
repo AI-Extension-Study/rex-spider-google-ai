@@ -18,18 +18,22 @@ export interface FolwrValues {
   ei: string;
 }
 
-// layout: the thread page lacks a value. stream: the folwr body has no guard
-// or a chunk cannot be walked. too-large: the folwr body is over
+// layout: the thread page lacks a value, or holds one out of its form, but
+// holds at least one of the four data- attributes that carry four of the
+// values. limited: it holds none of those four in any form, as Google's
+// limited page, its answer to too many reads, does (the pass stops on it
+// with a back-off). stream: the folwr body has no guard or a chunk cannot be
+// walked. too-large: the folwr body is over
 // FOLWR_TEXT_CAP and was not read. network: a request got no answer. The
 // rest are the answer's classification.
-export type ReadFailure = 'layout' | 'stream' | 'too-large' | Exclude<Classification, 'ok'> | 'network';
+export type ReadFailure = 'layout' | 'limited' | 'stream' | 'too-large' | Exclude<Classification, 'ok'> | 'network';
 
 // A failure's answer is the one whose classification ended the read, so the
-// pass can read its status and Retry-After. It is null for layout, stream
-// and too-large, which need neither, so a page or a folwr body (up to 40 Mi
-// units of the thread's text) and the URL with its tokens go no further than
-// here; and null for network, which got no answer. Its text and url are
-// never logged.
+// pass can read its status and Retry-After. It is null for layout, limited,
+// stream and too-large, which need neither, so a page or a folwr body (up to
+// 40 Mi units of the thread's text) and the URL with its tokens go no
+// further than here; and null for network, which got no answer. Its text
+// and url are never logged.
 export type ReadResult = { ok: true; thread: ParsedThread } | { ok: false; failure: ReadFailure; answer: Answer | null };
 
 // mstk and mtid are in id form (list.mts), so encoding changes nothing; it
@@ -72,6 +76,16 @@ export function folwrValues(html: string): FolwrValues | null {
   return { garc, mlro, mlros, xsrf, ei };
 }
 
+// Whether the page holds any of the four data- attributes in any form: the
+// name, as an attribute (after a space), and its =, whatever follows, quoted
+// or not, so a value out of form, or one written another way, still counts;
+// a name written as a script or JSON key does not. Only a page with none of
+// the four is Google's limited page; one with any is a layout change. kEI is
+// not asked: the limited pages of the live runs (2026-11-17) held none of
+// the four attributes, while kEI was checked there in one form only.
+const ATTRIBUTES = ['data-garc', 'data-lro-token', 'data-lro-signature', 'data-xsrf-folwr-token'].map((name) => new RegExp(`\\s${name}\\s*=`));
+const holdsAnyAttribute = (html: string): boolean => ATTRIBUTES.some((pattern) => pattern.test(html));
+
 // Only these five parameters, in this order: each dropped alone breaks the
 // read, and none of the page's other ten is needed.
 export function folwrUrl(v: FolwrValues): string {
@@ -103,7 +117,7 @@ export async function readThread(client: Client, entry: ListEntry, pace: () => P
   }
   const values = folwrValues(page.text);
   if (values === null) {
-    return failed('layout', null);
+    return failed(holdsAnyAttribute(page.text) ? 'layout' : 'limited', null);
   }
   await pace();
   const stream = await get(client, folwrUrl(values));
