@@ -18,15 +18,17 @@
 import { BACKOFF_CODES } from './backoff.mts';
 
 // Why the sending of a pass that read the list ended early. budget: the
-// detail reads spent the pass's reading time; mode: summarize was served
-// differently from the pass's start; disabled: the spider was switched off;
-// rate-limited and challenge: Google asked for a wait (a back-off is set);
-// not-signed-in: a 401, or a home page without SignOutOptions after a read
-// that found no thread values; failed-reads: three detail reads in a row
-// failed; halt-on-error: one did, with halt_on_error; store: the extension's
-// storage did not answer or did not keep a write; internal: a throw nothing
-// expected.
-export const STOPS = ['budget', 'mode', 'disabled', 'rate-limited', 'challenge', 'not-signed-in', 'failed-reads', 'halt-on-error', 'store', 'internal'] as const;
+// detail reads spent the pass's reading time; read-budget: the thread reads
+// of the last hour, across passes, reached the read budget (budget.mts);
+// mode: summarize was served differently from the pass's start; disabled:
+// the spider was switched off; rate-limited and challenge: Google asked for
+// a wait, and limited: it answered a thread page with its limited page (a
+// back-off is set for each); not-signed-in: a 401, or a home page without
+// SignOutOptions after a read that found no thread values or not all of
+// them; failed-reads: three detail reads in a row failed; halt-on-error: one
+// did, with halt_on_error; store: the extension's storage did not answer or
+// did not keep a write; internal: a throw nothing expected.
+export const STOPS = ['budget', 'read-budget', 'mode', 'disabled', 'rate-limited', 'challenge', 'limited', 'not-signed-in', 'failed-reads', 'halt-on-error', 'store', 'internal'] as const;
 
 // Why a list was read only in part. http-error: a page answered a status
 // that is neither a refusal nor a sign-out; unreadable: a page that is not a
@@ -91,7 +93,8 @@ export const CATALOGUE = {
   store: { ms: count },
   // A throw nothing expected, before the list was read.
   internal: { stage: { kind: 'enum', values: ['start', 'home', 'list'] }, ms: count },
-  // Skipped: the back-off a refusal set runs until this time (backoff.mts).
+  // Skipped: the back-off a refusal or the limited page set runs until this
+  // time (backoff.mts).
   backoff: { until: { kind: 'time' }, code: { kind: 'enum', values: BACKOFF_CODES } },
 } as const satisfies Record<string, Record<string, FieldSpec>>;
 

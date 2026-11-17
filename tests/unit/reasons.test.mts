@@ -53,7 +53,7 @@ test('a count is a whole number of at least 0', () => {
 });
 
 test('the stops are the closed set the pass can end its sending with', () => {
-  assert.deepEqual([...STOPS], ['budget', 'mode', 'disabled', 'rate-limited', 'challenge', 'not-signed-in', 'failed-reads', 'halt-on-error', 'store', 'internal']);
+  assert.deepEqual([...STOPS], ['budget', 'read-budget', 'mode', 'disabled', 'rate-limited', 'challenge', 'limited', 'not-signed-in', 'failed-reads', 'halt-on-error', 'store', 'internal']);
   for (const stop of STOPS) {
     assert.equal(formatReason('ok', { seen: 1, dispatched: 1, stop, ms: 1 }), `ok seen=1 dispatched=1 stop=${stop} ms=1`);
   }
@@ -100,5 +100,6 @@ test('a skipped pass names when its back-off runs out, as an ISO time, and what 
   assert.equal(formatReason('backoff', { until: new Date(Date.UTC(2026, 10, 20, 12, 5)), code: 'challenge' }), 'backoff until=2026-11-20T12:05:00.000Z code=challenge');
   assert.throws(() => formatReason('backoff', { until: Number.NaN, code: 'rate-limited' }), /until/);
   assert.throws(() => formatReason('backoff', { until: 'tomorrow' as never, code: 'rate-limited' }), /until/);
+  assert.equal(formatReason('backoff', { until: Date.UTC(2026, 10, 20, 13), code: 'limited' }), 'backoff until=2026-11-20T13:00:00.000Z code=limited');
   assert.throws(() => formatReason('backoff', { until: 1, code: 'provider-refused' as never }), /code/);
 });
