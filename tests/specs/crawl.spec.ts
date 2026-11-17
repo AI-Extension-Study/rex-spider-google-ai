@@ -21,14 +21,14 @@ const DAY = 86_400
 // no spec but the re-send ones depends on the clock.
 const T = 1_763_300_000
 
-// After each spec, the site was asked for nothing it did not expect, and
-// every request the crawler made is in a form its allow patterns name.
+// After each spec, every request the crawler made is in a form its allow
+// patterns name. A request the site does not expect lands in the fixtures'
+// unexpected list, which fails the spec.
 const test = base.extend<{ google: GoogleSite }>({
-  google: async ({ context, serviceWorker }, use) => {
-    const site = new GoogleSite()
+  google: async ({ context, unexpected, serviceWorker }, use) => {
+    const site = new GoogleSite(unexpected)
     await site.listen(context)
     await use(site)
-    expect(site.unexpected).toEqual([])
     const patterns: string[] = await serviceWorker.evaluate(() => self.rexGoogleAIPlugin.allowedUrls())
     expect(site.urls.filter((url) => !patterns.some((pattern) => new RegExp(pattern).test(url)))).toEqual([])
   },
@@ -186,12 +186,15 @@ test('served no summarize, a pass reads each listed thread and sends detail reco
 // rex-spider's own summarize flag only ever turns on, so the spider keeps its
 // own; each mode has its own upload key, and a switch re-sends, once, the
 // threads used in the 90 days before the first pass that ran the new mode.
+// Two threads sit a day either side of that edge.
 test('summarize true, then false, then true: each switch re-sends only the threads used in the 90 days before it, once', async ({ google, serviceWorker }) => {
   test.setTimeout(60_000)
   const now = Math.floor(Date.now() / 1000)
   const old = { n: 1, updated: now - 100 * DAY }
   const recent = { n: 2, updated: now - 3600 }
-  google.pages = [[recent, old]]
+  const inside = { n: 4, updated: now - 89 * DAY }
+  const outside = { n: 5, updated: now - 91 * DAY }
+  google.pages = [[recent, inside, outside, old]]
   await untilStoreOpen(serviceWorker)
   const modeSince = async (from: number) => {
     const record = await fetchValue(serviceWorker, 'rex-spider-google-ai-mode')
@@ -203,20 +206,21 @@ test('summarize true, then false, then true: each switch re-sends only the threa
   await configure(serviceWorker, { summarize: true })
   let from = Date.now()
   const first = await crawl(serviceWorker)
-  expect(records(first)).toEqual([summaryRecord(recent), summaryRecord(old)])
+  expect(records(first)).toEqual([summaryRecord(recent), summaryRecord(inside), summaryRecord(outside), summaryRecord(old)])
   expect(await modeSince(from)).toBe('summary')
 
   // A thread first listed while detail is served goes out in detail only.
   const fresh = { n: 3, updated: now - 60 }
-  google.pages = [[fresh, recent, old]]
+  google.pages = [[fresh, recent, inside, outside, old]]
+  const ids = [mtid(3), mtid(2), mtid(4), mtid(5), mtid(1)]
   google.requests.splice(0)
   await configure(serviceWorker)
   from = Date.now()
   const second = await crawl(serviceWorker)
-  expect(google.requests.splice(0)).toEqual(['home', 'list 0', 'page 3', 'folwr 3', 'page 2', 'folwr 2'])
-  expect(records(second)).toEqual([detailRecord(fresh), detailRecord(recent)])
+  expect(google.requests.splice(0)).toEqual(['home', 'list 0', 'page 3', 'folwr 3', 'page 2', 'folwr 2', 'page 4', 'folwr 4'])
+  expect(records(second)).toEqual([detailRecord(fresh), detailRecord(recent), detailRecord(inside)])
   expectInLayout(second)
-  expect(completions(second)).toEqual([[2, [mtid(3), mtid(2), mtid(1)], 'ok seen=3 dispatched=2']])
+  expect(completions(second)).toEqual([[3, ids, 'ok seen=5 dispatched=3']])
   expect(await modeSince(from)).toBe('detail')
 
   await configure(serviceWorker, { summarize: true })
@@ -224,12 +228,12 @@ test('summarize true, then false, then true: each switch re-sends only the threa
   const third = await crawl(serviceWorker)
   expect(records(third)).toEqual([summaryRecord(fresh)])
   expectInLayout(third)
-  expect(completions(third)).toEqual([[1, [mtid(3), mtid(2), mtid(1)], 'ok seen=3 dispatched=1']])
+  expect(completions(third)).toEqual([[1, ids, 'ok seen=5 dispatched=1']])
   expect(await modeSince(from)).toBe('summary')
 
   const fourth = await crawl(serviceWorker)
   expect(records(fourth)).toEqual([])
-  expect(completions(fourth)).toEqual([[0, [mtid(3), mtid(2), mtid(1)], 'ok seen=3 dispatched=0']])
+  expect(completions(fourth)).toEqual([[0, ids, 'ok seen=5 dispatched=0']])
 })
 
 // The spider before this rewrite keyed both modes alike, by <mstk>_<mtid>
@@ -278,33 +282,36 @@ test('signed out, the pass ends at the home page with count -1, its reason in th
   expect(await fetchValue(serviceWorker, 'rex-spider-google-ai-backoff')).toBeNull()
 })
 
-// A Retry-After longer than the first back-off's 5 minutes, so the stored
-// wait shows the header came through the worker's fetch.
-test('a 429 on a thread read stops the pass after the record before it, and the back-off it sets skips the next pass with no request', async ({ google, serviceWorker }) => {
-  const [first, second] = [{ n: 1, updated: T }, { n: 2, updated: T + 600 }]
-  google.pages = [[second, first]]
-  google.replies.set('folwr 1', { status: 429, headers: { 'Retry-After': '900' }, contentType: 'text/html', body: '<html>SITE-TEXT too many requests</html>' })
-  await untilStoreOpen(serviceWorker)
-  await configure(serviceWorker)
+// A 429 is a wait by its status alone, and the wait is the first back-off's
+// 5 minutes. A Retry-After longer than that lengthens it, so the stored wait
+// shows the header came through the worker's fetch.
+for (const [retryAfter, waitMs] of [[null, 300_000], ['900', 900_000]] as const) {
+  test(`a 429 ${retryAfter === null ? 'with no Retry-After' : `with Retry-After ${retryAfter}`} on a thread read stops the pass after the record before it, and the back-off it sets skips the next pass with no request`, async ({ google, serviceWorker }) => {
+    const [first, second] = [{ n: 1, updated: T }, { n: 2, updated: T + 600 }]
+    google.pages = [[second, first]]
+    google.replies.set('folwr 1', { status: 429, headers: retryAfter === null ? {} : { 'Retry-After': retryAfter }, contentType: 'text/html', body: '<html>SITE-TEXT too many requests</html>' })
+    await untilStoreOpen(serviceWorker)
+    await configure(serviceWorker)
 
-  const before = Date.now()
-  const round = await crawl(serviceWorker)
-  const after = Date.now()
-  expect(google.requests.splice(0)).toEqual(['home', 'list 0', 'page 2', 'folwr 2', 'page 1', 'folwr 1'])
-  expect(records(round)).toEqual([detailRecord(second)])
-  expectInLayout(round)
-  expect(completions(round)).toEqual([[1, [mtid(2), mtid(1)], 'ok seen=2 dispatched=1 left=1 stop=rate-limited']])
-  const backoff = await fetchValue(serviceWorker, 'rex-spider-google-ai-backoff')
-  expect(backoff).toEqual({ until: expect.any(Number), failures: 1, code: 'rate-limited' })
-  expect(backoff.until).toBeGreaterThanOrEqual(before + 900_000)
-  expect(backoff.until).toBeLessThanOrEqual(after + 900_000)
+    const before = Date.now()
+    const round = await crawl(serviceWorker)
+    const after = Date.now()
+    expect(google.requests.splice(0)).toEqual(['home', 'list 0', 'page 2', 'folwr 2', 'page 1', 'folwr 1'])
+    expect(records(round)).toEqual([detailRecord(second)])
+    expectInLayout(round)
+    expect(completions(round)).toEqual([[1, [mtid(2), mtid(1)], 'ok seen=2 dispatched=1 left=1 stop=rate-limited']])
+    const backoff = await fetchValue(serviceWorker, 'rex-spider-google-ai-backoff')
+    expect(backoff).toEqual({ until: expect.any(Number), failures: 1, code: 'rate-limited' })
+    expect(backoff.until).toBeGreaterThanOrEqual(before + waitMs)
+    expect(backoff.until).toBeLessThanOrEqual(after + waitMs)
 
-  const skipped = await crawl(serviceWorker)
-  const reason = `backoff until=${new Date(backoff.until).toISOString()} code=rate-limited`
-  expect(google.requests).toEqual([])
-  expect(completions(skipped)).toEqual([[-1, [], reason]])
-  expect(skipped.result).toEqual({ sitesCrawled: ['google-ai'], issues: [{ url: LOGIN, message: reason }] })
-})
+    const skipped = await crawl(serviceWorker)
+    const reason = `backoff until=${new Date(backoff.until).toISOString()} code=rate-limited`
+    expect(google.requests).toEqual([])
+    expect(completions(skipped)).toEqual([[-1, [], reason]])
+    expect(skipped.result).toEqual({ sitesCrawled: ['google-ai'], issues: [{ url: LOGIN, message: reason }] })
+  })
+}
 
 test('a redirect to /sorry/ ends the pass as a challenge, read from the URL the fetch ended on, and the back-off skips the next pass', async ({ google, serviceWorker }) => {
   const sorry = new SorryPage()

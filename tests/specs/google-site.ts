@@ -3,11 +3,13 @@
 // from the unit fixtures and answered by a route on the browser context,
 // which sees the extension service worker's requests. A request is answered
 // only when its URL is exactly one of the crawler's forms (the plan's request
-// list) for a thread or page the site lists, and is written down by a short
-// label. Any other http(s) request, to any host, is aborted and kept in
-// unexpected, so a spec can fail on it; a request no route sees (one a
-// redirect leads to) meets the fixtures' resolver rules, so nothing reaches
-// the real google.com. Every id, title and text is made up.
+// list) for a thread or page the site lists and it carries the browser's
+// made-up Google session cookie, and is written down by a short label. Any
+// other http(s) request, to any host, is aborted and kept in the fixtures'
+// unexpected list, which fails the spec. A request no route sees (one a
+// redirect leads to, or any made before the fixtures' first route is in)
+// meets their resolver rules, with no proxy, so nothing reaches the real
+// google.com. Every id, title and text is made up.
 import { type Server, createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
 
@@ -67,6 +69,14 @@ export interface Reply {
 
 const html = (body: string): Reply => ({ status: 200, contentType: 'text/html; charset=utf-8', body })
 
+// The browser's Google session, made up. Every crawler request must carry
+// it: the spider reads the participant's account only through the cookies
+// its fetch sends. SameSite=None so the route can see it: the cookie header
+// a route reads for the worker's request holds only None cookies, though
+// Chrome sends Lax and Strict ones with the request too.
+export const SESSION_COOKIE = { name: 'MADE_UP_SID', value: 'made-up-session', domain: '.google.com', path: '/', secure: true, httpOnly: true, sameSite: 'None' as const }
+const SESSION = `${SESSION_COOKIE.name}=${SESSION_COOKIE.value}`
+
 export class GoogleSite {
   // The list, page by page, newest first; each page but the last hands out
   // the next one's cursor. A spec may change it between passes.
@@ -85,12 +95,18 @@ export class GoogleSite {
   // The URL of every request answered, in order.
   readonly urls: string[] = []
 
-  // The method and URL of every request the site did not expect, aborted.
-  readonly unexpected: string[] = []
-
   private readonly gates = new Map<string, { readonly reach: () => void; readonly released: Promise<void> }>()
 
+  // The fixtures' list, which fails the spec on any entry.
+  private readonly unexpected: string[]
+
+  constructor(unexpected: string[]) {
+    this.unexpected = unexpected
+  }
+
+  // Plants the session cookie and answers every http(s) request from now on.
   async listen(context: BrowserContext): Promise<void> {
+    await context.addCookies([SESSION_COOKIE])
     await context.route(/^https?:\/\//, (route) => this.answer(route))
   }
 
@@ -144,6 +160,12 @@ export class GoogleSite {
     const label = request.method() === 'GET' ? this.labelOf(url) : null
     if (label === null) {
       this.unexpected.push(`${request.method()} ${url}`)
+      await route.abort()
+      return
+    }
+    const cookies = ((await request.allHeaders()).cookie ?? '').split(/;\s*/)
+    if (!cookies.includes(SESSION)) {
+      this.unexpected.push(`${request.method()} ${url} without the session cookie`)
       await route.abort()
       return
     }
