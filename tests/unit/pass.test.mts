@@ -1337,6 +1337,32 @@ test('a limited page stops the pass even when the home check cannot tell (a 500,
   }
 });
 
+// The crawler has met Google's limit, so its back-off is stored even when a
+// switch-off in the wait before the home check ends the pass, and the next
+// enabled pass does not request into the limit. A layout failure is not
+// Google's limit, and the same switch-off stores nothing.
+test('a switch-off served in the wait before the home check after a limited page still stores the limited back-off', async () => {
+  const pages = [[thread(1, 1), thread(2, 2)]];
+  const offAfterPage1 = (web: ReturnType<typeof site>) => rexSpider({ halt: false, enabled: () => !web.requests.some((url) => label(url) === 'page 1') });
+  const web = site({ pages, threadPages: { 1: LIMITED } });
+  const core = rexCore();
+  const run = await pass(web, offAfterPage1(web), { core });
+  assert.deepEqual(requestsOf(run.events), ['home', 'list 0', 'page 1']);
+  assert.deepEqual([run.sent, core.memoWrites], [[], []]);
+  assert.deepEqual(core.backoffWrites, [{ until: run.clock() + 60 * MINUTE, failures: 1, code: 'limited' }]);
+  assert.equal(withoutMs(run.outcome.reason), 'ok seen=2 dispatched=0 left=2 stop=disabled');
+  const skipped = site({ pages });
+  const next = await pass(skipped, rexSpider({ halt: false }), { core, now: run.clock() + MINUTE });
+  assert.deepEqual(skipped.requests, []);
+  assert.equal(next.outcome.reason, `backoff until=${new Date(run.clock() + 60 * MINUTE).toISOString()} code=limited`);
+  const layoutWeb = site({ pages, threadPages: { 1: ok(threadPage({ garc: null })) } });
+  const layoutCore = rexCore();
+  const layout = await pass(layoutWeb, offAfterPage1(layoutWeb), { core: layoutCore });
+  assert.deepEqual(requestsOf(layout.events), ['home', 'list 0', 'page 1']);
+  assert.deepEqual([layout.sent, layoutCore.memoWrites, layoutCore.backoffWrites], [[], [], []]);
+  assert.equal(withoutMs(layout.outcome.reason), 'ok seen=2 dispatched=0 left=2 stop=disabled');
+});
+
 test('a limited page neither counts in the run of failed reads nor ends one as halt_on_error would', async () => {
   const pages = [[1, 2, 3, 4].map((n) => thread(n, n))];
   const core = rexCore();

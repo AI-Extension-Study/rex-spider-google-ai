@@ -581,9 +581,18 @@ async function sendDetails(pass: Pass, due: readonly ListEntry[]): Promise<Sendi
         stop = 'not-signed-in';
         break;
       }
+      if (read.why === 'limited') {
+        // Google's limited page: the back-off is set before the home check,
+        // so a switch-off or a throw in its wait still stores it, and the
+        // next enabled pass does not request into the limit. A refusal there
+        // replaces it, and a signed-out home page clears it.
+        pass.refusal = { code: 'limited', retryAfterMs: null };
+      }
       if (read.why === 'layout' || read.why === 'limited') {
         const home = await checkHome(pass);
         if (home.kind === 'signed-out') {
+          // A signed-out session's thread page, not Google's limit.
+          pass.refusal = null;
           pass.say('the home page holds no SignOutOptions after a read that found no thread values; the user is not signed in');
           stop = 'not-signed-in';
           break;
@@ -595,10 +604,8 @@ async function sendDetails(pass: Pass, due: readonly ListEntry[]): Promise<Sendi
         }
       }
       if (read.why === 'limited') {
-        // Google's limited page: this thread gets nothing now, neither a
-        // summary nor a memo, and does not count as a failed read; it is read
-        // after the back-off.
-        pass.refusal = { code: 'limited', retryAfterMs: null };
+        // This thread gets nothing now, neither a summary nor a memo, and does
+        // not count as a failed read; it is read after the back-off.
         pass.say('a thread page held none of the thread values, as Google\'s limited page; the threads not read are read after the back-off');
         stop = 'limited';
         break;
