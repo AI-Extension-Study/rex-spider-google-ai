@@ -15,15 +15,16 @@
 // after a cursor ends the pass as not signed in, with no back-off. A read
 // whose page lacks a thread value checks the home page once more, and ends
 // the pass so too if the home page has no SignOutOptions. A page with none of
-// the five values is Google's limited page, its answer to too many reads:
-// after that home check it stops the pass with a back-off of its own, and
-// its thread gets nothing, as after a 429. Any other failed read is that
-// thread's alone: its summary goes out in the detail's place unless one went
-// out at that time, and a memo holds it back for a day, or a week when the
-// failure will not pass by itself. Three such in a row end the pass, or the
-// first with halt_on_error. A detail pass reads at most the read budget's
-// threads in any hour, counted across passes in the store (budget.mts), and
-// stops once the hour's reads reach it.
+// the four data- attributes that carry the thread values is Google's limited
+// page, its answer to too many reads: after that home check it stops the
+// pass with a back-off of its own, kept even if a switch-off ends the pass
+// in the check's wait, and its thread gets nothing, as after a 429. Any
+// other failed read is that thread's alone: its summary goes out in the
+// detail's place unless one went out at that time, and a memo holds it back
+// for a day, or a week when the failure will not pass by itself. Three such
+// in a row end the pass, or the first with halt_on_error. A detail pass
+// reads at most the read budget's threads in any hour, counted across passes
+// in the store (budget.mts), and stops once the hour's reads reach it.
 import type { DateString } from '@bric/rex-types/types';
 
 import { type BackoffCode, type BackoffState, backoffDecision, nextBackoff } from './backoff.mts';
@@ -606,7 +607,7 @@ async function sendDetails(pass: Pass, due: readonly ListEntry[]): Promise<Sendi
       if (read.why === 'limited') {
         // This thread gets nothing now, neither a summary nor a memo, and does
         // not count as a failed read; it is read after the back-off.
-        pass.say('a thread page held none of the thread values, as Google\'s limited page; the threads not read are read after the back-off');
+        pass.say('a thread page held none of the thread value attributes, as Google\'s limited page; the threads not read are read after the back-off');
         stop = 'limited';
         break;
       }

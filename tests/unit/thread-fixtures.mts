@@ -249,8 +249,9 @@ export function threadPage(values: PageValues = {}): string {
 
 // Google's limited thread page, made up: what it answers a crawler that has
 // read too many threads, a 200 search page that holds none of the five
-// values, not even out of form. It keeps near misses of their names (data-ei,
-// the folif token, kEXPI), which must not count as one of them.
+// values and none of the four data- attributes that carry four of them. It
+// keeps near misses of their names (data-ei, the folif token), which must not
+// count as one of them.
 export function limitedPage(): string {
   return '<!doctype html><html lang="en"><head><title>Made-up - Google Search</title>'
     + `<script nonce="made-up">(function(){window.google={kEXPI:'0,made-up',u:'made-up'};})();</script></head>`

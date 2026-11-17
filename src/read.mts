@@ -19,10 +19,11 @@ export interface FolwrValues {
 }
 
 // layout: the thread page lacks a value, or holds one out of its form, but
-// holds at least one of the five. limited: it holds none of the five, not
-// even out of form, as Google's limited page, its answer to too many reads,
-// does (the pass stops on it with a back-off). stream: the folwr body has no
-// guard or a chunk cannot be walked. too-large: the folwr body is over
+// holds at least one of the four data- attributes that carry four of the
+// values. limited: it holds none of those four in any form, as Google's
+// limited page, its answer to too many reads, does (the pass stops on it
+// with a back-off). stream: the folwr body has no guard or a chunk cannot be
+// walked. too-large: the folwr body is over
 // FOLWR_TEXT_CAP and was not read. network: a request got no answer. The
 // rest are the answer's classification.
 export type ReadFailure = 'layout' | 'limited' | 'stream' | 'too-large' | Exclude<Classification, 'ok'> | 'network';
@@ -75,15 +76,15 @@ export function folwrValues(html: string): FolwrValues | null {
   return { garc, mlro, mlros, xsrf, ei };
 }
 
-// Whether the page holds any of the five in any form: an attribute's name
-// and its =, or kEI and its :, whatever follows, quoted or not, so a value
-// out of form, or one written another way, still counts. Only a page with
-// none of them is Google's limited page; one with any is a layout change.
-const PRESENT = [
-  ...['data-garc', 'data-lro-token', 'data-lro-signature', 'data-xsrf-folwr-token'].map((name) => new RegExp(`\\s${name}\\s*=`)),
-  /kEI\s*:/,
-];
-const holdsAnyValue = (html: string): boolean => PRESENT.some((pattern) => pattern.test(html));
+// Whether the page holds any of the four data- attributes in any form: the
+// name, as an attribute (after a space), and its =, whatever follows, quoted
+// or not, so a value out of form, or one written another way, still counts;
+// a name written as a script or JSON key does not. Only a page with none of
+// the four is Google's limited page; one with any is a layout change. kEI is
+// not asked: the limited pages of the live runs (2026-11-17) held none of
+// the four attributes, while kEI was checked there in one form only.
+const ATTRIBUTES = ['data-garc', 'data-lro-token', 'data-lro-signature', 'data-xsrf-folwr-token'].map((name) => new RegExp(`\\s${name}\\s*=`));
+const holdsAnyAttribute = (html: string): boolean => ATTRIBUTES.some((pattern) => pattern.test(html));
 
 // Only these five parameters, in this order: each dropped alone breaks the
 // read, and none of the page's other ten is needed.
@@ -116,7 +117,7 @@ export async function readThread(client: Client, entry: ListEntry, pace: () => P
   }
   const values = folwrValues(page.text);
   if (values === null) {
-    return failed(holdsAnyValue(page.text) ? 'layout' : 'limited', null);
+    return failed(holdsAnyAttribute(page.text) ? 'layout' : 'limited', null);
   }
   await pace();
   const stream = await get(client, folwrUrl(values));

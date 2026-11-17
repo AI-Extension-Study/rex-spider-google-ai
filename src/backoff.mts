@@ -12,8 +12,9 @@ export const BACKOFF_CAP_MS = 6 * 60 * 60_000;
 
 // What asked for the wait: a 429, a 503 or a Retry-After, or a redirect to
 // Google's unusual-traffic page (/sorry/), by the same names as client.mts's
-// classify; or a thread page that holds none of the five values, Google's
-// limited page (read.mts). Reported on each skipped pass.
+// classify; or a thread page that holds none of the four data- attributes
+// that carry the thread values, Google's limited page (read.mts). Reported
+// on each skipped pass.
 export const BACKOFF_CODES = ['rate-limited', 'challenge', 'limited'] as const;
 export type BackoffCode = (typeof BACKOFF_CODES)[number];
 

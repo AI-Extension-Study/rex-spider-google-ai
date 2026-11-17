@@ -153,11 +153,14 @@ for (const key of Object.keys(FOLWR_VALUES) as (keyof FolwrValues)[]) {
   });
 }
 
-// Google's limited page holds none of the five, not even out of form, and is
-// Google's answer to too many reads rather than a changed layout: the pass
-// stops on it with a back-off (pass.mts). Any one of the five, in any form,
-// keeps a page a layout failure.
+// Google's limited page is its answer to too many reads, not a changed
+// layout: the pass stops on it with a back-off (pass.mts). It holds none of
+// the four data- attributes that carry four of the values, in any form. Any
+// one of them, in attribute form and any quoting, keeps a page a layout
+// failure. kEI is not asked: the live limited pages held none of the four
+// attributes, while kEI was checked there in one form only.
 const NONE: PageValues = { garc: null, mlro: null, mlros: null, xsrf: null, ei: null };
+const ATTRIBUTE_KEYS = ['garc', 'mlro', 'mlros', 'xsrf'] as const;
 
 test('a thread page with none of the five values is limited, after one request and no pace()', async () => {
   const pages: [string, string][] = [
@@ -173,8 +176,8 @@ test('a thread page with none of the five values is limited, after one request a
   }
 });
 
-for (const key of Object.keys(FOLWR_VALUES) as (keyof FolwrValues)[]) {
-  test(`a thread page with only ${key}, in or out of form, is a layout failure, not limited`, async () => {
+for (const key of ATTRIBUTE_KEYS) {
+  test(`a thread page with only ${key}'s attribute, in or out of form, is a layout failure, not limited`, async () => {
     for (const value of [FOLWR_VALUES[key], '', 'Made.up value&amp;']) {
       const { result } = await read([answer(200, threadPage({ ...NONE, [key]: value }))]);
       assert.deepEqual(result, { ok: false, failure: 'layout', answer: null }, `${key} ${JSON.stringify(value)}`);
@@ -182,25 +185,51 @@ for (const key of Object.keys(FOLWR_VALUES) as (keyof FolwrValues)[]) {
   });
 }
 
-test('a value written with other quotes, none, or spaces around its = or : still counts as present', async () => {
+test('an attribute written with other quotes, none, or spaces around its = still counts as present', async () => {
   const base = threadPage(NONE);
-  assert.ok(base.includes(' data-srtst=') && base.includes('kEXPI:'), 'Test setup invalid: no place to add a value');
+  assert.ok(base.includes(' data-srtst='), 'Test setup invalid: no place to add an attribute');
   const pages = [
     base.replace(' data-srtst=', ' data-garc=GarcUnquoted data-srtst='),
     base.replace(' data-srtst=', " data-lro-token='MlroSingle' data-srtst="),
     base.replace(' data-srtst=', ' data-lro-signature = "SigSpaced" data-srtst='),
     base.replace(' data-srtst=', '\ndata-xsrf-folwr-token="Xsrf:1" data-srtst='),
-    base.replace('kEXPI:', 'kEI:"EiDouble",kEXPI:'),
-    base.replace('kEXPI:', "kEI : 'EiSpaced',kEXPI:"),
   ];
   for (const text of pages) {
     assert.deepEqual((await read([answer(200, text)])).result, { ok: false, failure: 'layout', answer: null }, text.slice(-160));
   }
 });
 
-test('a near miss of a value\'s name is not one of the five: data-ei, the folif token, kEXPI and longer attribute names leave a page limited', async () => {
+// kEI in any form, or none, leaves the verdict to the four attributes.
+const KEI_FORMS: [string, (page: string) => string, string][] = [
+  ['no kEI', (page) => page, ''],
+  ["kEI:'x'", (page) => page.replace('kEXPI:', "kEI:'MadeUpEi',kEXPI:"), "kEI:'MadeUpEi'"],
+  ["google.kEI='x'", (page) => page.replace('</head>', "<script>google.kEI='MadeUpEi';</script></head>"), "google.kEI='MadeUpEi'"],
+  ['"kEI":"x"', (page) => page.replace('</head>', '<script>var madeUp = {"kEI":"MadeUpEi"};</script></head>'), '"kEI":"MadeUpEi"'],
+  ['kEI : "x"', (page) => page.replace('kEXPI:', 'kEI : "MadeUpEi",kEXPI:'), 'kEI : "MadeUpEi"'],
+];
+
+test('kEI in any form, or none, does not change the verdict: limited without the four attributes, layout with one', async () => {
+  for (const [form, add, added] of KEI_FORMS) {
+    const without = add(threadPage(NONE));
+    const withOne = add(threadPage({ ...NONE, garc: 'Made.up' }));
+    for (const page of [without, withOne]) {
+      assert.ok(page.includes(added), `Test setup invalid: ${form} was not added`);
+    }
+    assert.deepEqual((await read([answer(200, without)])).result, { ok: false, failure: 'limited', answer: null }, form);
+    assert.deepEqual((await read([answer(200, withOne)])).result, { ok: false, failure: 'layout', answer: null }, form);
+  }
+});
+
+test('an attribute name written as a JSON or script key does not count as present', async () => {
+  const keys = '<script>var madeUp = {"data-garc":"x","data-lro-token":"x",\'data-lro-signature\':\'x\',"data-xsrf-folwr-token" : "x"};</script></head>';
+  const page = threadPage(NONE).replace('</head>', keys);
+  assert.ok(page.includes('"data-garc":"x"'), 'Test setup invalid: no JSON key');
+  assert.deepEqual((await read([answer(200, page)])).result, { ok: false, failure: 'limited', answer: null });
+});
+
+test('a near miss of an attribute\'s name is not one of the four: data-ei, the folif token and longer names leave a page limited', async () => {
   const page = threadPage(NONE).replace(' data-srtst=', ' data-old-data-garc="Other0123" data-xsrf-folwr-token-old="Other0123" data-lro-tokens="Other0123" data-srtst=');
-  for (const near of ['data-ei="', 'data-xsrf-folif-token="', 'kEXPI:\'', 'data-old-data-garc="', 'data-xsrf-folwr-token-old="', 'data-lro-tokens="']) {
+  for (const near of ['data-ei="', 'data-xsrf-folif-token="', 'data-old-data-garc="', 'data-xsrf-folwr-token-old="', 'data-lro-tokens="']) {
     assert.ok(page.includes(near), `Test setup invalid: no ${near}`);
   }
   assert.deepEqual((await read([answer(200, page)])).result, { ok: false, failure: 'limited', answer: null });
