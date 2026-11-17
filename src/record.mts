@@ -56,8 +56,9 @@ export interface ParsedThread {
 export interface AimMetadata {
   // SHA-256 of the title in lowercase hex, or null.
   title_hash: string | null;
-  // The entry's created and updated as ISO 8601 instants in UTC, the same
-  // text the record's started and ended upload as.
+  // The entry's created and updated as ISO 8601 instants in UTC, in the form
+  // the record's started and ended upload in. started is the earlier of the
+  // two, so created_at is the only place a later [5] goes out.
   created_at: string;
   updated_at: string;
   // Exactly the LIST_NUMBER_KEYS, each an integer from 0 to 999 or null.
@@ -135,6 +136,18 @@ function metadataOf(entry: ListEntry, titleHash: string | null): AimMetadata {
   };
 }
 
+// The earlier of the entry's created and updated. On threads begun from an
+// AI Overview follow-up ([27] is 2), the list's updated ([6]) can be seconds
+// to minutes before its created ([5]), and a record that starts at [5] would
+// end before it starts. Compared to the nanosecond, so two times less than a
+// millisecond apart still order right. ended stays updated, and created_at and
+// updated_at keep the entry's own two times.
+function startOf(entry: ListEntry): DateString {
+  const created = entry.created.value;
+  const updated = entry.updated.value;
+  return created !== null && updated !== null && updated.epochNanoseconds < created.epochNanoseconds ? entry.updated : entry.created;
+}
+
 // A summary record: no turns and no turns_complete. Its date, ended in epoch
 // ms, is the time the upload key is built from (keys.mts).
 export function buildSummaryRecord(entry: ListEntry, titleHash: string | null): AimRecord {
@@ -145,7 +158,7 @@ export function buildSummaryRecord(entry: ListEntry, titleHash: string | null): 
     format_version: FORMAT_VERSION,
     is_summary: true,
     date: entry.updated.timestamp(),
-    started: entry.created,
+    started: startOf(entry),
     ended: entry.updated,
     turns: [],
     metadata: metadataOf(entry, titleHash),
@@ -192,14 +205,15 @@ function newest(turns: readonly AimTurn[], maxTurns: number, jsonLimit: number):
 export function buildDetailRecord(entry: ListEntry, titleHash: string | null, thread: ParsedThread, { maxTurns = MAX_TURNS, turnsJsonLimit = TURNS_JSON_LIMIT }: DetailOptions = {}): AimRecord {
   const all = thread.turns.map(turnOf);
   const turns = newest(all, maxTurns, turnsJsonLimit);
+  const started = startOf(entry);
   return {
     name: NAME,
     platform: PLATFORM,
     identifier: entry.mtid,
     format_version: FORMAT_VERSION,
     is_summary: false,
-    date: entry.created.timestamp(),
-    started: entry.created,
+    date: started.timestamp(),
+    started,
     ended: entry.updated,
     turns,
     turns_complete: turns.length === all.length && thread.complete === true,

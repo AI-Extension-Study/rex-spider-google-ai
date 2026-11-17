@@ -76,6 +76,8 @@ const RECORDS: ReadonlyArray<[string, Json]> = [
   ['summary of an entry never updated', summaryOf(listEntry({ 6: null }))],
   ['summary whose list numbers are out of range', summaryOf(listEntry({ 3: 1000, 13: -1, 17: 1.5, 27: 'two', 30: 999 }))],
   ['summary at fractional seconds', summaryOf(listEntry({ 5: [CREATED_S + 0.25, 0], 6: [UPDATED_S + 0.5, 0] }))],
+  ['summary of an entry whose [6] is before its [5]', summaryOf(listEntry({ 6: [CREATED_S - 42, 263_669_000] }))],
+  ['detail of an entry whose [6] is before its [5]', detailOf(listEntry({ 6: [CREATED_S - 42, 263_669_000] }), thread(SMALL))],
   ['detail of a two-question thread', detailOf(listEntry(), thread(SMALL))],
   ['detail of five parsed turn blocks', detailOf(listEntry(), parsed({}, {}, {}, {}, {}))],
   ['detail whose first question has no heading', detailOf(listEntry(), parsed({ heading: null }, {}))],
@@ -145,7 +147,7 @@ function assertInForm(out: Json, what: string): void {
 }
 
 test('every record the builders make on the fixtures comes back equal: as built, as the walker leaves its times, and with each instant as its string', () => {
-  assert.equal(RECORDS.length, 13, 'Test setup invalid: a fixture record is missing');
+  assert.equal(RECORDS.length, 15, 'Test setup invalid: a fixture record is missing');
   const details = RECORDS.map(([, record]) => record).filter((record) => record.is_summary === false);
   assert.ok(
     details.some((record) => record.turns_complete === false) && details.some((record) => record.turns_complete === true)
@@ -171,6 +173,21 @@ test('every record the builders make on the fixtures comes back equal: as built,
       assert.ok(out.started instanceof DateString && out.ended instanceof DateString, `${what}, ${form}: a time is not a DateString`);
       assertInForm(out, `${what}, ${form}`);
     }
+  }
+});
+
+// started is the earlier of [5] and [6] (record.mts), so on such an entry
+// started, ended and updated_at are all [6] and created_at alone is [5].
+test('a record of an entry whose [6] is before its [5] comes back whole: started and ended [6], the detail dated by [6], created_at [5]', () => {
+  const earlyIso = '2025-11-16T13:32:38Z';
+  for (const what of ['summary of an entry whose [6]', 'detail of an entry whose [6]']) {
+    const record = recordOf(what);
+    const out = redact(record);
+    assert.equal(wire(out), wire(record), what);
+    const sent = plain(out);
+    assert.deepEqual([sent.date, sent.started, sent.ended], [(CREATED_S - 42) * 1000, earlyIso, earlyIso], what);
+    assert.deepEqual([(sent.metadata as Json).created_at, (sent.metadata as Json).updated_at], [CREATED_ISO, earlyIso], what);
+    assertInForm(out, what);
   }
 });
 
@@ -237,30 +254,52 @@ test('a point that is not a format 1 record of this platform, or whose top level
 });
 
 test('a list time at the edges of 2001 to 2286: from 1e9 to 1e10 - 1 seconds the record comes back equal, one second outside it is cut to the scaffold', () => {
-  // [5] and [6] as the list sends them, seconds and nanoseconds; started is
-  // [5] and ended [6], so a detail (dated by started) and a summary (dated by
-  // ended) check each edge on both times.
+  // [5] and [6] as the list sends them, seconds and nanoseconds. started is
+  // the earlier of the two and ended is [6], so a detail (dated by started)
+  // and a summary (dated by ended) check each edge on both times.
   const at = (created: number, updated: number) => listEntry({ 5: [created, 0], 6: [updated, 0] });
   const middle = 1.5e9;
+  const check = (label: string, record: Json, kept: boolean): void => {
+    const out = redact(record);
+    if (kept) {
+      assert.equal(wire(out), wire(record), label);
+    } else {
+      assert.deepEqual(out, scaffoldOf(record), label);
+    }
+  };
   const cases: Array<[string, ListEntry, boolean]> = [
     ['both at 1e9', at(1e9, 1e9), true],
     ['both at 1e10 - 1', at(1e10 - 1, 1e10 - 1), true],
-    ['started at 1e9, ended at 1e10 - 1', at(1e9, 1e10 - 1), true],
-    ['started at 1e9 - 1', at(1e9 - 1, middle), false],
-    ['ended at 1e9 - 1', at(middle, 1e9 - 1), false],
-    ['started at 1e10', at(1e10, middle), false],
-    ['ended at 1e10', at(middle, 1e10), false],
+    ['[5] at 1e9, [6] at 1e10 - 1', at(1e9, 1e10 - 1), true],
+    ['[5] at 1e9 - 1', at(1e9 - 1, middle), false],
+    ['[6] at 1e9 - 1, which started is too', at(middle, 1e9 - 1), false],
+    ['[6] at 1e10', at(middle, 1e10), false],
     ['both at 1e10', at(1e10, 1e10), false],
+    // started is [6], so [5] goes out only as created_at, which keeps a UTC
+    // time with a four-digit year.
+    ['[5] at 1e10 and [6] before it', at(1e10, middle), true],
   ];
   for (const [what, entry, kept] of cases) {
     for (const record of [summaryOf(entry), detailOf(entry, thread(SMALL))]) {
-      const out = redact(record);
-      const label = `${what}, is_summary ${String(record.is_summary)}`;
-      if (kept) {
-        assert.equal(wire(out), wire(record), label);
-      } else {
-        assert.deepEqual(out, scaffoldOf(record), label);
-      }
+      check(`${what}, is_summary ${String(record.is_summary)}`, record, kept);
+    }
+  }
+  // started is never after ended in a record the builders make, so neither
+  // a start past 2286 nor an end before 2001 comes alone from them. Those two
+  // edges are checked on records changed by hand, each next to the same
+  // change one second inside, which comes back equal, so the cut is the
+  // bound's.
+  const handMade: Array<[string, 'started' | 'ended', number, boolean]> = [
+    ['started at 1e10 - 1', 'started', 1e10 - 1, true],
+    ['started at 1e10', 'started', 1e10, false],
+    ['ended at 1e9', 'ended', 1e9, true],
+    ['ended at 1e9 - 1', 'ended', 1e9 - 1, false],
+  ];
+  for (const [what, key, seconds, kept] of handMade) {
+    for (const built of [summaryOf(at(middle, middle)), detailOf(at(middle, middle), thread(SMALL))]) {
+      const record: Json = { ...built, [key]: new DateString(seconds) };
+      record.date = ((record.is_summary ? record.ended : record.started) as DateString).timestamp();
+      check(`by hand, ${what}, is_summary ${String(record.is_summary)}`, record, kept);
     }
   }
 });
@@ -650,7 +689,7 @@ const inYears = (date: unknown): boolean => secondsOf(date) >= 1e9 && secondsOf(
 test('2,000 seeded departures of a raw list entry: every record the builders make comes back equal, but a list time outside 2001 to 2286 cuts it to the scaffold', (t) => {
   const random = seeded(20261117);
   const turns = parsed({}, { heading: null });
-  const tally = { records: 0, none: 0, cut: 0 };
+  const tally = { records: 0, none: 0, cut: 0, nulled: 0 };
   for (let n = 0; n < 2000; n += 1) {
     const raw = departRaw(rawEntry(), random);
     const entry = entryOf(raw);
@@ -663,7 +702,13 @@ test('2,000 seeded departures of a raw list entry: every record the builders mak
       const what = `departure ${n}, is_summary ${String(record.is_summary)}: ${JSON.stringify(raw)}`;
       const out = redact(record);
       if (inYears(record.started) && inYears(record.ended)) {
-        assert.equal(wire(out), wire(record), what);
+        // started is the earlier of [5] and [6], so a [5] past 2286 goes out
+        // only as created_at, which reads null when its year is not four
+        // digits.
+        const metadata = record.metadata as Json;
+        const createdAt = UTC.test(String(metadata.created_at)) ? metadata.created_at : null;
+        tally.nulled += createdAt === null ? 1 : 0;
+        assert.equal(wire(out), wire({ ...record, metadata: { ...metadata, created_at: createdAt } }), what);
       } else {
         tally.cut += 1;
         assert.deepEqual(out, scaffoldOf(record), what);
@@ -675,8 +720,8 @@ test('2,000 seeded departures of a raw list entry: every record the builders mak
       }
     }
   }
-  t.diagnostic(`${tally.records} records, ${tally.cut} of them cut for a time; ${tally.none} departures gave no entry`);
-  assert.ok(tally.records > 2000 && tally.cut > 20 && tally.none > 100, JSON.stringify(tally));
+  t.diagnostic(`${tally.records} records, ${tally.cut} of them cut for a time, ${tally.nulled} kept with created_at null; ${tally.none} departures gave no entry`);
+  assert.ok(tally.records > 2000 && tally.cut > 20 && tally.nulled > 0 && tally.none > 100, JSON.stringify(tally));
 });
 
 // Every module a source loads: import or export ... from, with either quote,
