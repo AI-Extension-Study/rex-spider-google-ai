@@ -272,12 +272,19 @@ test('an entry with no [6] starts and ends at [5], summary and detail', async ()
   }
 });
 
-test('[6] after [5], by a second or by the fixture\'s hour, or equal to it: started is [5] and ended [6], as before', async () => {
+// The 0.4 ms case shares [5]'s epoch ms, so a comparison in ms cannot order
+// the two, and its ISO text (20.0004...Z) sorts before [5]'s (20Z), so a
+// comparison of the text orders them the wrong way.
+test('[6] after [5], by 0.4 ms, a second or the fixture\'s hour, or equal to it: started is [5] and ended [6], as before', async () => {
   const cases: Array<[string, ListEntry, number]> = [
     ['an hour after', listEntry(), UPDATED_S],
     ['a second after', listEntry({ 6: [CREATED_S + 1, 0] }), CREATED_S + 1],
+    ['0.4 ms after', listEntry({ 6: [CREATED_S + 0.0004, 0] }), CREATED_S + 0.0004],
     ['equal', listEntry({ 6: [CREATED_S, 0] }), CREATED_S],
   ];
+  const close = cases[2][1];
+  assert.equal(close.created.timestamp(), close.updated.timestamp(), 'Test setup invalid: the 0.4 ms case differs in epoch ms');
+  assert.ok(close.updated.toJSON() < close.created.toJSON(), 'Test setup invalid: the 0.4 ms case\'s text does not sort before [5]\'s');
   for (const [what, entry, ended] of cases) {
     const summary = await summaryOf(entry);
     const detail = await detailOf(entry, thread(SMALL));
@@ -286,7 +293,7 @@ test('[6] after [5], by a second or by the fixture\'s hour, or equal to it: star
       assert.equal(record.ended.originalValue, `number:${ended}`, what);
       assert.deepEqual([record.metadata.created_at, record.metadata.updated_at], [new DateString(CREATED_S).toJSON(), new DateString(ended).toJSON()], what);
     }
-    assert.equal(summary.date, ended * 1000, what);
+    assert.equal(summary.date, new DateString(ended).timestamp(), what);
     assert.equal(detail.date, CREATED_S * 1000, what);
   }
 });

@@ -253,7 +253,7 @@ test('a point that is not a format 1 record of this platform, or whose top level
   assert.deepEqual(wrong, []);
 });
 
-test('a list time at the edges of 2001 to 2286: from 1e9 to 1e10 - 1 seconds the record comes back equal, one second outside it is cut to the scaffold', () => {
+test('a list time at the edges of 2001 to 2286: a started and ended from 1e9 to 1e10 - 1 seconds come back equal, either one second outside cuts the record to the scaffold, and a [5] past it with [6] before it goes out as created_at', () => {
   // [5] and [6] as the list sends them, seconds and nanoseconds. started is
   // the earlier of the two and ended is [6], so a detail (dated by started)
   // and a summary (dated by ended) check each edge on both times.
@@ -686,7 +686,7 @@ const entryOf = (raw: unknown[]): ListEntry | null => parseListPage(`)]}'\n\n${J
 const secondsOf = (date: unknown): number => Number((date as DateString).originalValue.slice('number:'.length));
 const inYears = (date: unknown): boolean => secondsOf(date) >= 1e9 && secondsOf(date) < 1e10;
 
-test('2,000 seeded departures of a raw list entry: every record the builders make comes back equal, but a list time outside 2001 to 2286 cuts it to the scaffold', (t) => {
+test('2,000 seeded departures of a raw list entry: a record whose started and ended are in 2001 to 2286 comes back equal but for a created_at past a four-digit year, which reads null; any other is cut to the scaffold', (t) => {
   const random = seeded(20261117);
   const turns = parsed({}, { heading: null });
   const tally = { records: 0, none: 0, cut: 0, nulled: 0 };
