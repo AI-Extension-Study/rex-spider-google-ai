@@ -5,6 +5,7 @@ import { sha256 } from '@bric/rex-core/common';
 import type { DateString } from '@bric/rex-types/types';
 
 import type { BackoffState } from '../../src/backoff.mts';
+import { READ_BUDGET } from '../../src/budget.mts';
 import { type Answer, RequestError } from '../../src/client.mts';
 import { HOME_URL } from '../../src/home.mts';
 import { listUrl } from '../../src/list.mts';
@@ -172,12 +173,22 @@ interface CoreOptions {
   readonly memoUnkept?: boolean;
   readonly backoff?: BackoffState | null;
   readonly backoffUnanswered?: boolean;
+  // The thread reads' times as stored, and how their store fails: no answer
+  // (flagged), a value of another form, a write not kept, a call that never
+  // settles, or one that rejects.
+  readonly reads?: readonly number[];
+  readonly readsUnanswered?: boolean;
+  readonly readsMalformed?: boolean;
+  readonly readsUnkept?: boolean;
+  readonly readsSilent?: 'get' | 'set';
+  readonly readsThrow?: 'get' | 'set';
 }
 
-// rex-core's store as the pass sees it: the mode record, the memos and the
-// back-off.
+// rex-core's store as the pass sees it: the mode record, the memos, the
+// back-off and the read times.
 function rexCore(options: CoreOptions = {}) {
-  const held = { mode: options.mode ?? null, backoff: options.backoff ?? null };
+  const held: { mode: ModeRecord | null; backoff: BackoffState | null; reads: readonly number[] | null } = { mode: options.mode ?? null, backoff: options.backoff ?? null, reads: options.reads ?? null };
+  const readsWrites: (readonly number[])[] = [];
   const writes: ModeRecord[] = [];
   const memos = new Map(Object.entries(options.memos ?? {}));
   const memoWrites: [string, DetailMemo][] = [];
@@ -185,7 +196,7 @@ function rexCore(options: CoreOptions = {}) {
   const backoffWrites: (BackoffState | null)[] = [];
   const malformed = new Set(options.memoMalformed ?? []);
   return {
-    held, writes, memos, memoWrites, memoClears, backoffWrites,
+    held, writes, memos, memoWrites, memoClears, backoffWrites, readsWrites,
     store: {
       mode: {
         get: async (): Promise<Read<ModeRecord>> => {
@@ -223,6 +234,23 @@ function rexCore(options: CoreOptions = {}) {
         set: async (state: BackoffState | null): Promise<Write> => {
           backoffWrites.push(state);
           held.backoff = state;
+          return { ok: true, unanswered: false };
+        },
+      },
+      reads: {
+        get: async (): Promise<Read<readonly number[]>> => {
+          if (options.readsSilent === 'get') return new Promise(() => {});
+          if (options.readsThrow === 'get') throw new Error('the store broke');
+          if (options.readsUnanswered === true) return { value: null, unanswered: true, malformed: false };
+          if (options.readsMalformed === true && readsWrites.length === 0) return { value: null, unanswered: false, malformed: true };
+          return { value: held.reads, unanswered: false, malformed: false };
+        },
+        set: async (times: readonly number[]): Promise<Write> => {
+          readsWrites.push(times);
+          if (options.readsSilent === 'set') return new Promise(() => {});
+          if (options.readsThrow === 'set') throw new Error('the store broke');
+          if (options.readsUnkept === true) return { ok: false, unanswered: false };
+          held.reads = times;
           return { ok: true, unanswered: false };
         },
       },
@@ -339,6 +367,16 @@ async function pass(web: ReturnType<typeof site>, side: ReturnType<typeof rexSpi
           return core.store.backoff.set(state);
         },
       },
+      reads: {
+        get: () => {
+          trace.push('reads get');
+          return core.store.reads.get();
+        },
+        set: (times) => {
+          trace.push('reads set');
+          return core.store.reads.set(times);
+        },
+      },
     },
     dispatch: (record) => {
       if (options.dispatchThrowsOn !== undefined && record.identifier === mtid(options.dispatchThrowsOn)) throw new Error('the queue is full');
@@ -442,7 +480,7 @@ test('the list is walked page by page, crawl_delay apart, and a thread on any pa
 });
 
 // The calls that go to rex-core: the store's and rex-spider's.
-const REX_CORE_CALL = /^(window|lookup |stamp |mode (get|set)|memo |clear |backoff (get|set))/;
+const REX_CORE_CALL = /^(window|lookup |stamp |mode (get|set)|memo |clear |backoff (get|set)|reads (get|set))/;
 
 test('every call to rex-core is made just after a keep-alive call, since store calls do not reset the worker\'s idle timer', async () => {
   const side = rexSpider({ keys: [keyOf(2, 2, 'detail')] });
@@ -748,7 +786,7 @@ test('the detail budget is 360 s of reading', () => {
 // pinned here: a store deadline past the worker's 30 s idle limit, or a
 // hash one past a few seconds, would outlast the worker.
 test('the pass\'s limits are the ChatGPT crawler\'s, and the memo lengths a day and a week', () => {
-  assert.deepEqual(PASS_LIMITS, { settleMs: 3000, batch: 25, storeMs: 20_000, hashMs: 1000, detailBudgetMs: 360_000, failedRun: 3 });
+  assert.deepEqual(PASS_LIMITS, { settleMs: 3000, batch: 25, storeMs: 20_000, hashMs: 1000, detailBudgetMs: 360_000, failedRun: 3, readBudget: READ_BUDGET });
   assert.deepEqual([RETRY_SOON_MS, RETRY_LATE_MS], [DAY, 7 * DAY]);
 });
 
@@ -792,7 +830,8 @@ test('memo reads during the reads count against the budget: at 100 s a memo read
 
 test('the paced waits do not count against the budget: twenty threads read 30 s apart all go out', async () => {
   const pages = [Array.from({ length: 20 }, (_, k) => thread(k + 1, k + 1))];
-  const run = await pass(site({ pages }), rexSpider());
+  // A read budget of more than twenty, so only the reading time can stop it.
+  const run = await pass(site({ pages }), rexSpider(), { limits: { readBudget: { reads: 21, windowMs: READ_BUDGET.windowMs } } });
   assert.equal(readsOf(run.events).length, 20);
   assert.ok(run.clock() - NOW > 1_200_000, 'the waits took less than two budgets');
   assert.equal(withoutMs(run.outcome.reason), 'ok seen=20 dispatched=20');
@@ -1311,6 +1350,100 @@ test('a limited page neither counts in the run of failed reads nor ends one as h
   assert.equal(withoutMs(halting.outcome.reason), 'ok seen=4 dispatched=0 left=4 stop=limited');
 });
 
+// ---- the read budget ----
+//
+// At most 15 thread reads in any 60 minutes, counted across passes in the
+// store. The first thread's read starts 60 s into a pass: the wait after the
+// home page and the one before the thread.
+
+const FIRST_READ = NOW + 60_000;
+const HOUR = 60 * MINUTE;
+
+test('with 15 reads stored in the last hour, a detail pass reads no thread and stops as read-budget, leaving every due thread', async () => {
+  const core = rexCore({ reads: Array.from({ length: 15 }, (_, k) => NOW - k * MINUTE) });
+  const side = rexSpider({ halt: false });
+  const run = await pass(site({ pages: [[thread(1, 1), thread(2, 2)]] }), side, { core });
+  assert.deepEqual(requestsOf(run.events), ['home', 'list 0']);
+  assert.deepEqual([run.sent, side.stamps, core.memoWrites, core.backoffWrites, core.readsWrites], [[], [], [], [], []]);
+  assert.equal(withoutMs(run.outcome.reason), 'ok seen=2 dispatched=0 left=2 stop=read-budget');
+});
+
+test('a read stops counting once it is 60 minutes old: 15 that old let the read go ahead, 15 a millisecond younger do not', async () => {
+  const at = (ms: number) => rexCore({ reads: Array.from({ length: 15 }, () => ms) });
+  const old = await pass(site({ pages: [[thread(1, 1)]] }), rexSpider(), { core: at(FIRST_READ - HOUR) });
+  assert.deepEqual(readsOf(old.events), [1]);
+  assert.equal(withoutMs(old.outcome.reason), 'ok seen=1 dispatched=1');
+  const young = await pass(site({ pages: [[thread(1, 1)]] }), rexSpider(), { core: at(FIRST_READ - HOUR + 1) });
+  assert.deepEqual(readsOf(young.events), []);
+  assert.equal(withoutMs(young.outcome.reason), 'ok seen=1 dispatched=0 left=1 stop=read-budget');
+});
+
+test('with 14 reads stored in the last hour, one thread is read, and the pass stops as read-budget before the next', async () => {
+  const core = rexCore({ reads: Array.from({ length: 14 }, (_, k) => NOW - k * MINUTE) });
+  const side = rexSpider();
+  const run = await pass(site({ pages: [[thread(1, 1), thread(2, 2)]] }), side, { core });
+  assert.deepEqual(readsOf(run.events), [1]);
+  assert.deepEqual(side.stamps, [keyOf(1, 1, 'detail')]);
+  assert.equal((core.held.reads as number[]).length, 15);
+  assert.equal(withoutMs(run.outcome.reason), 'ok seen=2 dispatched=1 left=1 stop=read-budget');
+});
+
+test('a read\'s time is stored just before its page request, so a read that fails counts too', async () => {
+  const core = rexCore();
+  const run = await pass(site({ pages: [[thread(1, 1), thread(2, 2)]], threadPages: { 1: failing(500) } }), rexSpider({ halt: false }), { core });
+  for (const n of [1, 2]) {
+    const at = run.trace.indexOf(`GET page ${n}`);
+    assert.deepEqual(run.trace.slice(at - 4, at), ['keep-alive', 'reads get', 'keep-alive', 'reads set'], `thread ${n}`);
+  }
+  // Thread 1's page at 60 s, its failure's wait, then thread 2's page at 90 s.
+  assert.deepEqual(core.readsWrites, [[FIRST_READ], [FIRST_READ, FIRST_READ + 30_000]]);
+  assert.equal(withoutMs(run.outcome.reason), 'ok seen=2 dispatched=2 failed=1');
+});
+
+test('the stored times keep the newest 15, and a time more than a day ahead is dropped and not counted, while one less ahead counts', async () => {
+  const older = Array.from({ length: 16 }, (_, k) => NOW - 2 * HOUR - k * MINUTE);
+  const core = rexCore({ reads: [NOW + 2 * DAY, ...older] });
+  const run = await pass(site({ pages: [[thread(1, 1)]] }), rexSpider(), { core });
+  assert.deepEqual(readsOf(run.events), [1]);
+  assert.deepEqual(core.readsWrites, [[...older.slice(0, 14).reverse(), FIRST_READ]]);
+  const behind = await pass(site({ pages: [[thread(1, 1)]] }), rexSpider(), { core: rexCore({ reads: Array.from({ length: 15 }, () => NOW + HOUR) }) });
+  assert.deepEqual(readsOf(behind.events), []);
+  assert.equal(withoutMs(behind.outcome.reason), 'ok seen=1 dispatched=0 left=1 stop=read-budget');
+});
+
+test('read times that cannot be read, or a time that is not stored, stop the pass as store before any thread read', { timeout: 5000 }, async () => {
+  const cases: [string, CoreOptions][] = [
+    ['a read with no answer', { readsUnanswered: true }],
+    ['a read that never settles', { readsSilent: 'get' }],
+    ['a read that rejects', { readsThrow: 'get' }],
+    ['a write not kept', { readsUnkept: true }],
+    ['a write that never settles', { readsSilent: 'set' }],
+    ['a write that rejects', { readsThrow: 'set' }],
+  ];
+  for (const [what, options] of cases) {
+    const core = rexCore(options);
+    const run = await pass(site({ pages: [[thread(1, 1), thread(2, 2)]] }), rexSpider({ halt: false }), { core });
+    assert.deepEqual(requestsOf(run.events), ['home', 'list 0'], what);
+    assert.deepEqual([run.sent, core.memoWrites, core.backoffWrites], [[], [], []], what);
+    assert.equal(withoutMs(run.outcome.reason), 'ok seen=2 dispatched=0 left=2 stop=store', what);
+  }
+});
+
+test('read times of the wrong form read as none: the read goes ahead and its time replaces them', async () => {
+  const core = rexCore({ readsMalformed: true, reads: Array.from({ length: 15 }, () => NOW) });
+  const run = await pass(site({ pages: [[thread(1, 1)]] }), rexSpider(), { core });
+  assert.deepEqual(readsOf(run.events), [1]);
+  assert.deepEqual(core.readsWrites, [[FIRST_READ]]);
+});
+
+test('a summary pass reads no thread, so it neither reads nor stores read times, and a spent budget does not stop it', async () => {
+  const core = rexCore({ reads: Array.from({ length: 15 }, () => NOW) });
+  const run = await pass(site({ pages: [[thread(1, 1), thread(2, 2)]] }), rexSpider({ summarize: true }), { core });
+  assert.equal(run.trace.some((entry) => entry.startsWith('reads ')), false);
+  assert.deepEqual(kindsOf(run.sent), [['1', true], ['2', true]]);
+  assert.equal(withoutMs(run.outcome.reason), 'ok seen=2 dispatched=2');
+});
+
 // ---- the back-off ----
 
 test('a back-off that has run out is cleared by a pass that reads a list page with no refusal, and kept by one that reads none', async () => {
@@ -1353,7 +1486,7 @@ test('a back-off that gets no answer does not stop the pass', async () => {
   assert.equal(withoutMs(run.outcome.reason), 'ok seen=1 dispatched=1');
 });
 
-test('every memo and back-off call is made just after a keep-alive call too', async () => {
+test('every memo, back-off and read-time call is made just after a keep-alive call too', async () => {
   const core = rexCore({
     backoff: { until: NOW - 1, failures: 2, code: 'rate-limited' },
     memos: {
@@ -1363,7 +1496,7 @@ test('every memo and back-off call is made just after a keep-alive call too', as
     },
   });
   const run = await pass(site({ pages: [[thread(1, 1), thread(2, 2), thread(3, 3)]], folwrs: { 1: failing(500) } }), rexSpider({ halt: false }), { core });
-  for (const kind of ['backoff get', 'memo get', 'memo 1', 'clear 2', 'backoff set']) {
+  for (const kind of ['backoff get', 'memo get', 'memo 1', 'clear 2', 'backoff set', 'reads get', 'reads set']) {
     assert.ok(run.trace.some((entry) => entry.startsWith(kind)), `no ${kind} call`);
   }
   const calls = run.trace.flatMap((entry, at) => (REX_CORE_CALL.test(entry) ? [[entry, run.trace[at - 1]]] : []));

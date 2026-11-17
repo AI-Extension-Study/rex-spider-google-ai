@@ -21,10 +21,13 @@
 // thread's alone: its summary goes out in the detail's place unless one went
 // out at that time, and a memo holds it back for a day, or a week when the
 // failure will not pass by itself. Three such in a row end the pass, or the
-// first with halt_on_error.
+// first with halt_on_error. A detail pass reads at most the read budget's
+// threads in any hour, counted across passes in the store (budget.mts), and
+// stops once the hour's reads reach it.
 import type { DateString } from '@bric/rex-types/types';
 
 import { type BackoffCode, type BackoffState, backoffDecision, nextBackoff } from './backoff.mts';
+import { READ_BUDGET, type ReadBudget, readsInWindow, withRead } from './budget.mts';
 import { type Answer, type Client, RequestError, classify, retryAfterMs } from './client.mts';
 import { HOME_URL, isSignedIn } from './home.mts';
 import { uploadKeyId } from './keys.mts';
@@ -78,9 +81,11 @@ export interface PassLimits {
   // Failed thread reads in a row that end a pass without halt_on_error: past
   // a few, the reads are failing for a reason the next threads share.
   readonly failedRun: number;
+  // Thread reads in any window, across passes (budget.mts).
+  readonly readBudget: ReadBudget;
 }
 
-export const PASS_LIMITS: PassLimits = { settleMs: 3000, batch: 25, storeMs: 20_000, hashMs: 1000, detailBudgetMs: 360_000, failedRun: 3 };
+export const PASS_LIMITS: PassLimits = { settleMs: 3000, batch: 25, storeMs: 20_000, hashMs: 1000, detailBudgetMs: 360_000, failedRun: 3, readBudget: READ_BUDGET };
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -111,8 +116,9 @@ export interface PassDeps {
   readonly client: Client;
   readonly framework: PassFramework;
   // rex-core's store, for the mode record (mode.mts), the back-off
-  // (backoff.mts) and the memos of failed reads.
-  readonly store: Pick<AimStore, 'mode' | 'backoff' | 'memo'>;
+  // (backoff.mts), the memos of failed reads and the read times
+  // (budget.mts).
+  readonly store: Pick<AimStore, 'mode' | 'backoff' | 'memo' | 'reads'>;
   readonly dispatch: (record: AimRecord) => void;
   // Every wait of the pass, in chunks of at most 20 s with a keep-alive call
   // before each (pacing.mts).
@@ -421,6 +427,41 @@ async function checkHome(pass: Pass): Promise<HomeCheck> {
   return { kind: 'unknown' };
 }
 
+// The read budget, asked just before a thread's page request: spent when the
+// reads stored in its window have reached its count; store when the times
+// got no answer or the new one was not kept, since no read is made without
+// its time stored first; ok once this read's time is stored. A read counts
+// from its page request, whatever comes of it. Times of another form read as
+// none, and this read's time replaces them.
+async function spendRead(pass: Pass): Promise<'ok' | 'spent' | 'store'> {
+  const budget = pass.limits.readBudget;
+  let times: readonly number[];
+  try {
+    const read = await stored(pass, () => pass.deps.store.reads.get());
+    if (read.unanswered) {
+      throw new StoreSilent();
+    }
+    times = read.value ?? [];
+  } catch {
+    pass.say('the read times got no answer; the reads stop for this pass');
+    return 'store';
+  }
+  const now = pass.now();
+  if (readsInWindow(times, now, budget) >= budget.reads) {
+    pass.say('the read budget is spent; the threads not read are read in a later pass');
+    return 'spent';
+  }
+  try {
+    if ((await stored(pass, () => pass.deps.store.reads.set(withRead(times, now, budget)))).ok) {
+      return 'ok';
+    }
+  } catch {
+    // Said below.
+  }
+  pass.say('a read time was not kept; the reads stop for this pass');
+  return 'store';
+}
+
 // A write that waits for the wait before the next read, as a record waits to
 // be stored before its key does: a detail record's key, or the memo of a
 // failed read, whose summary may have just gone out.
@@ -504,6 +545,11 @@ async function sendDetails(pass: Pass, due: readonly ListEntry[]): Promise<Sendi
       }
       // halt_on_error as served now, for this thread's read.
       const halts = !framework.continueAfterError();
+      const spend = await spendRead(pass);
+      if (spend !== 'ok') {
+        stop = spend === 'spent' ? 'read-budget' : 'store';
+        break;
+      }
       const read = await readDetail(pass, entry);
       if (read.kind === 'record') {
         inARow = 0;
