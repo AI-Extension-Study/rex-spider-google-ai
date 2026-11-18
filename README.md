@@ -124,7 +124,9 @@ The hash uses no secret key, so someone who guesses a title exactly can confirm 
 - **How back-offs run.** Refusals in a row are counted across codes, and each wait is from its own code's base. Passes during a back-off end at once with no request. A pass that reads a list page with no refusal clears it. A stored wait more than 6 hours ahead is ignored, since only a clock that went back leaves one.
   - The back-off is read with rex-core's 1 s store deadline, and once more with 20 s when that gets no answer, since the extension's uploads share the same database. A pass goes ahead only when neither read answers.
   - Before a refusal's back-off is written, the stored one is read again, and the new one never waits less or counts fewer refusals than it, so a back-off the pass could not read is doubled, not restarted (`src/pass.mts`, `laterBackoff` in `src/backoff.mts`).
-- **Sign-out.** A home page without `SignOutOptions`, a 401 anywhere, or a list page after a cursor with no entry list (`[]`, as a session signed out mid-walk answers; an empty last page `[null, null, 1]` is not one) ends the pass as not signed in, with no back-off (`src/list.mts:245-249`). A thread page that lacks a value but still holds one of the four attributes gets the same home check before its failure counts.
+- **Sign-out.** A home page without `SignOutOptions`, or a 401 anywhere, ends the pass as not signed in, with no back-off.
+  - A list page after a cursor with no entry list (`[]`, as a session signed out mid-walk answers, or `[[], null, 1]`; an empty last page `[null, null, 1]` is not one) gets a home check first (`src/list.mts:246-251`, `listEnded` in `src/pass.mts`). Signed in, the list ended there and the walk is whole. Signed out, or a home page that cannot say, ends the pass as not signed in, and a refusal stops it with its back-off.
+  - A thread page that lacks a value but still holds one of the four attributes gets the same home check before its failure counts.
 - **Any other failed read is that thread's alone.** That covers a page lacking a value or holding one out of form, a stream with no turn block or no answer found in any turn, a broken stream, a body over the cap, a 403, a 404, a 5xx and no answer.
   - Its summary record goes out in the detail's place, once per last use, unless one already went out at that time. It gets no key, so the detail read comes again.
   - A memo (`rex-spider-google-ai-detail-memo-<mtid>`) then holds the thread back. It waits 1 day after a first failure that may pass by itself (no answer, a 5xx or a redirect not followed, a page lacking a value, a stream with no answer found, a broken stream), and 7 days otherwise or on a repeat. A thread used since is read at once.
@@ -144,7 +146,7 @@ Each pass sends one event, `rex-spider-google-ai-complete`, with `crawled_count`
 | `partial` | a later list page failed, or the walk was cut; the same fields as `ok`, plus `cut` |
 | `none` | signed in, and no thread since the window's start |
 | `list-failed` | the list could not be read into a thread in the window: a first page that is not a list page, or a list read only in part that gave none; `cut` says why |
-| `not-signed-in` | no `SignOutOptions`, a 401, or no entry list after a cursor; `stage` is `home` or `list` |
+| `not-signed-in` | no `SignOutOptions`, a 401, or no entry list after a cursor with a home page that then does not say signed in; `stage` is `home` or `list` |
 | `rate-limited`, `challenge` | a refusal at the home page or a list page, and a back-off started |
 | `backoff` | skipped: a back-off runs `until` the time given; `code` is `rate-limited`, `challenge` or `limited` |
 | `http-error`, `network`, `timeout` | the home page or the first list page did not answer properly |

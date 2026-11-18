@@ -654,9 +654,6 @@ test('a refusal or a sign-out on a later list page ends the pass with nothing se
     [failing(429), 'rate-limited stage=list status=429'],
     [SORRY, 'challenge stage=list status=429'],
     [failing(401), 'not-signed-in stage=list status=401'],
-    // A signed-out session answers the list with [] and a 200.
-    [ok(")]}'\n\n[]"), 'not-signed-in stage=list'],
-    [ok(listBody([], null)), 'not-signed-in stage=list'],
   ];
   for (const [answer, reason] of cases) {
     const run = await pass(site({ pages, lists: { 1: answer } }), rexSpider({ summarize: true }));
@@ -664,6 +661,66 @@ test('a refusal or a sign-out on a later list page ends the pass with nothing se
     assert.deepEqual(run.sent, [], reason);
     assert.deepEqual([run.outcome.count, run.outcome.ids, withoutMs(run.outcome.reason)], [-1, [], reason]);
   }
+});
+
+// A list page after a cursor with no entry list: a signed-out session
+// answers the list with [] and a 200, and the page after an account's last
+// full page might come as [[], null, 1]. The home page decides which.
+const NO_LIST: [string, Answer][] = [['[]', ok(")]}'\n\n[]")], ['[[], null, 1]', ok(listBody([], null))]];
+
+test('a list page after a cursor with no entry list checks the home page; signed in, the list ended there and the walk is whole', async () => {
+  for (const [form, answer] of NO_LIST) {
+    const run = await pass(site({ pages: [[thread(1, 1)], [thread(2, 2)]], lists: { 1: answer } }), rexSpider({ summarize: true }));
+    assert.deepEqual(run.events.slice(0, 7), ['GET home', 'wait 30000', 'GET list 0', 'wait 30000', 'GET list 1', 'wait 30000', 'GET home'], form);
+    assert.deepEqual(kindsOf(run.sent), [['1', true]], form);
+    assert.deepEqual([run.outcome.count, run.outcome.ids, withoutMs(run.outcome.reason)], [1, [mtid(1)], 'ok seen=1 dispatched=1'], form);
+  }
+  // An account of exactly one full page, whose next page holds no entry.
+  const full = Array.from({ length: 20 }, (_, k) => thread(k + 1, k + 1));
+  const run = await pass(site({ pages: [full, []], lists: { 1: ok(listBody([], null)) } }), rexSpider({ summarize: true }));
+  assert.deepEqual([run.outcome.count, withoutMs(run.outcome.reason)], [20, 'ok seen=20 dispatched=20']);
+});
+
+test('a list page after a cursor with no entry list and a home page that says signed out, or cannot say, ends the pass as not signed in with nothing sent', async () => {
+  const homes: [string, Reply][] = [
+    ['no SignOutOptions', (nth) => (nth === 1 ? SIGNED_IN : SIGNED_OUT)],
+    ['a 401', (nth) => (nth === 1 ? SIGNED_IN : failing(401))],
+    ['a 500', (nth) => (nth === 1 ? SIGNED_IN : failing(500))],
+    ['no answer', (nth) => {
+      if (nth === 1) return SIGNED_IN;
+      throw new RequestError('network');
+    }],
+  ];
+  for (const [form, answer] of NO_LIST) {
+    for (const [what, home] of homes) {
+      const core = rexCore();
+      const run = await pass(site({ home, pages: [[thread(1, 1)], [thread(2, 2)]], lists: { 1: answer } }), rexSpider({ summarize: true }), { core });
+      assert.deepEqual(requestsOf(run.events), ['home', 'list 0', 'list 1', 'home'], `${form} ${what}`);
+      assert.deepEqual([run.sent, core.backoffWrites], [[], []], `${form} ${what}`);
+      assert.deepEqual([run.outcome.count, run.outcome.ids, withoutMs(run.outcome.reason)], [-1, [], 'not-signed-in stage=list'], `${form} ${what}`);
+    }
+  }
+});
+
+test('a list page after a cursor with no entry list and a refused home check stops the pass with that refusal and its back-off', async () => {
+  const cases: [Answer, string, string][] = [
+    [SORRY, 'challenge stage=list status=429', 'challenge'],
+    [failing(429, { 'retry-after': '600' }), 'rate-limited stage=list status=429 retry-after=600', 'rate-limited'],
+  ];
+  for (const [refusal, reason, code] of cases) {
+    const core = rexCore();
+    const run = await pass(site({ home: (nth) => (nth === 1 ? SIGNED_IN : refusal), pages: [[thread(1, 1)], [thread(2, 2)]], lists: { 1: ok(listBody([], null)) } }), rexSpider({ summarize: true }), { core });
+    assert.deepEqual(run.sent, [], reason);
+    assert.deepEqual([run.outcome.count, withoutMs(run.outcome.reason)], [-1, reason]);
+    assert.deepEqual(core.backoffWrites.map((state) => state?.code), [code], reason);
+  }
+});
+
+test('a switch-off served in the wait before that home check ends the pass as disabled at the list', async () => {
+  const web = site({ pages: [[thread(1, 1)], [thread(2, 2)]], lists: { 1: ok(listBody([], null)) } });
+  const run = await pass(web, rexSpider({ summarize: true, enabled: () => web.requests.length < 3 }));
+  assert.deepEqual(requestsOf(run.events), ['home', 'list 0', 'list 1']);
+  assert.deepEqual([run.outcome.count, withoutMs(run.outcome.reason)], [-1, 'disabled stage=list']);
 });
 
 test('a list read in part is no reading of the account: count -1 and no ids, while what was read goes out and the reason says why the list was cut', async () => {

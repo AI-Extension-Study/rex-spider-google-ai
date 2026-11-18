@@ -12,12 +12,13 @@
 // outlives the worker (backoff.mts), which skips the passes after it until
 // it runs out; that thread gets nothing and is read after it. A home page
 // without SignOutOptions, a 401 anywhere, or a list that comes back empty
-// after a cursor ends the pass as not signed in, with no back-off. A read
-// whose page lacks a thread value checks the home page once more, and ends
-// the pass so too if the home page has no SignOutOptions. A page with none of
-// the four data- attributes that carry the thread values is Google's limited
-// page, its answer to too many reads: after that home check it stops the
-// pass with a back-off of its own, kept even if a switch-off ends the pass
+// after a cursor with a home page that then does not say signed in ends the
+// pass as not signed in, with no back-off; signed in, the list ended there.
+// A read whose page lacks a thread value checks the home page once more, and
+// ends the pass so too if the home page has no SignOutOptions. A page with
+// none of the four data- attributes that carry the thread values is Google's
+// limited page, its answer to too many reads: after that home check it stops
+// the pass with a back-off of its own, kept even if a switch-off ends the pass
 // in the check's wait, and its thread gets nothing, as after a 429. Any
 // other failed read is that thread's alone: its summary goes out in the
 // detail's place unless one went out at that time, and a memo holds it back
@@ -397,26 +398,27 @@ async function readDetail(pass: Pass, entry: ListEntry): Promise<DetailRead> {
   }
 }
 
-type HomeCheck = { readonly kind: 'signed-in' | 'signed-out' | 'unknown' } | { readonly kind: 'refused'; readonly code: 'rate-limited' | 'challenge' };
+type HomeCheck = { readonly kind: 'signed-in' | 'signed-out' | 'unknown' } | { readonly kind: 'refused'; readonly code: 'rate-limited' | 'challenge'; readonly status: number };
 
 // The home page once more, after a read whose page lacked a thread value or
-// all five: a signed-out session's thread page lacks them too. A refusal
-// sets the back-off as anywhere else. An answer that cannot say either way
-// (no answer, another status) lets a layout failure count, and a limited
-// page stop the pass.
+// all five, or a list page after a cursor with no entry list: a signed-out
+// session answers both so. A refusal sets the back-off as anywhere else. An
+// answer that cannot say either way (no answer, another status) lets a
+// layout failure count, a limited page stop the pass, and the list's end
+// read as a sign-out.
 async function checkHome(pass: Pass): Promise<HomeCheck> {
   await beforeRequest(pass);
   let home: Answer;
   try {
     home = await pass.deps.client.get(HOME_URL);
   } catch {
-    pass.say('the home page check got no answer; the read counts as failed');
+    pass.say('the home page check got no answer');
     return { kind: 'unknown' };
   }
   const verdict = classify(home);
   if (verdict === 'rate-limited' || verdict === 'challenge') {
     pass.refusal = { code: verdict, retryAfterMs: retryAfterMs(home, pass.now()) };
-    return { kind: 'refused', code: verdict };
+    return { kind: 'refused', code: verdict, status: home.status };
   }
   if (verdict === 'signed-out') {
     return { kind: 'signed-out' };
@@ -424,7 +426,7 @@ async function checkHome(pass: Pass): Promise<HomeCheck> {
   if (verdict === 'ok') {
     return { kind: isSignedIn(home.text) ? 'signed-in' : 'signed-out' };
   }
-  pass.say(`the home page check failed (status ${home.status}); the read counts as failed`);
+  pass.say(`the home page check failed (status ${home.status})`);
   return { kind: 'unknown' };
 }
 
@@ -779,10 +781,6 @@ function walkStopped(pass: Pass, walk: WalkResult): PassOutcome | null {
     }
     return null;
   }
-  if (walk.stop === 'no-list') {
-    pass.say('the list came back empty after a cursor; the session ended during the walk');
-    return none(pass, 'not-signed-in', { stage: 'list' });
-  }
   if (walk.outcome === 'failed') {
     if (walk.stop === 'timeout' || walk.stop === 'network') {
       return none(pass, walk.stop, { stage: 'list' });
@@ -790,6 +788,35 @@ function walkStopped(pass: Pass, walk: WalkResult): PassOutcome | null {
     return none(pass, 'list-failed', { cut: cutOf(walk) });
   }
   return null;
+}
+
+// A list page after a cursor with no entry list ([] or [[], null, 1]): a
+// session signed out mid-walk answers so, and so might the page after an
+// account's last full page. The home page decides. Signed in, the list ended
+// there and the walk is whole (null). Signed out, or a home page that cannot
+// say either way, ends the pass as not signed in, as before the check; a
+// refusal stops it with its back-off.
+async function listEnded(pass: Pass): Promise<PassOutcome | null> {
+  let home: HomeCheck;
+  try {
+    home = await checkHome(pass);
+  } catch (error) {
+    if (error instanceof SwitchedOff) {
+      return none(pass, 'disabled', { stage: 'list' });
+    }
+    throw error;
+  }
+  if (home.kind === 'signed-in') {
+    pass.say('a list page after a cursor held no entry list and the home page says signed in; the list ended there');
+    return null;
+  }
+  if (home.kind === 'refused') {
+    return home.code === 'challenge'
+      ? none(pass, 'challenge', { stage: 'list', status: home.status })
+      : none(pass, 'rate-limited', { stage: 'list', status: home.status, 'retry-after': seconds(pass.refusal?.retryAfterMs) });
+  }
+  pass.say('the list came back empty after a cursor and the home page does not say signed in; the session ended during the walk');
+  return none(pass, 'not-signed-in', { stage: 'list' });
 }
 
 async function crawlWindow(pass: Pass): Promise<CrawlWindow | null> {
@@ -901,6 +928,13 @@ async function run(pass: Pass): Promise<PassOutcome> {
       return none(pass, 'disabled', { stage: 'list' });
     }
     throw error;
+  }
+  if (walk.stop === 'no-list') {
+    const ended = await listEnded(pass);
+    if (ended !== null) {
+      return ended;
+    }
+    walk = { entries: walk.entries, outcome: 'whole', malformed: walk.malformed, answer: null };
   }
   const stopped = walkStopped(pass, walk);
   if (stopped !== null) {

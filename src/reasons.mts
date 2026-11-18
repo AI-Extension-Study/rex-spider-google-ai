@@ -74,7 +74,8 @@ export const CATALOGUE = {
   'list-failed': { cut, ms: count },
   // A home page without SignOutOptions (no status), a 401 (status=401), or a
   // list page after a cursor with no entry list, as a session that signed out
-  // mid-walk answers (stage=list, no status).
+  // mid-walk answers, when the home page then does not say signed in
+  // (stage=list, no status).
   'not-signed-in': { stage: place, status: optionalCount, ms: count },
   // A 429, a 503 or a Retry-After, which is given in seconds when it could
   // be read.
