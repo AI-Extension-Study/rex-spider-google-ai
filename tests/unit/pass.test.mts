@@ -5,7 +5,7 @@ import { sha256 } from '@bric/rex-core/common';
 import type { DateString } from '@bric/rex-types/types';
 
 import type { BackoffState } from '../../src/backoff.mts';
-import { READ_BUDGET } from '../../src/budget.mts';
+import { LIMITED_AFTER_READS, LIMITED_WINDOW_MS, READ_BUDGET } from '../../src/budget.mts';
 import { type Answer, RequestError } from '../../src/client.mts';
 import { HOME_URL } from '../../src/home.mts';
 import { listUrl } from '../../src/list.mts';
@@ -1294,14 +1294,87 @@ test('halt_on_error is read before each thread: served during the reads, it ends
 // ---- Google's limited page ----
 //
 // After about 40 requests Google answers the thread page with a limited
-// page: a 200 search page that holds none of the five values (read.mts).
+// page: a 200 search page that holds none of the five values (read.mts). A
+// page with none of the four attributes is taken for it only after
+// LIMITED_AFTER_READS reads in the LIMITED_WINDOW_MS before it; earlier it is
+// a layout failure. The limited tests store that many reads a minute apart before the
+// pass.
 
 const LIMITED = ok(limitedPage());
+const readsBefore = (now: number, count: number = LIMITED_AFTER_READS): number[] => Array.from({ length: count }, (_, k) => now - (k + 1) * MINUTE);
+const afterReads = (options: CoreOptions = {}, now = NOW) => rexCore({ ...options, reads: readsBefore(now) });
+
+test('a page with none of the four attributes is limited only after 5 reads in the hour before it; after 4 it is a layout failure, with its summary and a 1-day memo', async () => {
+  assert.equal(LIMITED_AFTER_READS, 5);
+  const four = rexCore({ reads: readsBefore(NOW, 4) });
+  const early = await pass(site({ pages: [[thread(1, 1), thread(2, 2)]], threadPages: { 1: LIMITED } }), rexSpider({ halt: false }), { core: four });
+  assert.deepEqual(requestsOf(early.events), ['home', 'list 0', 'page 1', 'home', 'page 2', 'folwr 2']);
+  assert.deepEqual(kindsOf(early.sent), [['1', true], ['2', false]]);
+  assert.deepEqual(four.memoWrites.map(([id, memo]) => [short(id), memo.retryMs, memo.failures]), [['1', DAY, 1]]);
+  assert.deepEqual(four.backoffWrites, []);
+  assert.equal(withoutMs(early.outcome.reason), 'ok seen=2 dispatched=2 failed=1');
+  const five = rexCore({ reads: readsBefore(NOW, 5) });
+  const late = await pass(site({ pages: [[thread(1, 1), thread(2, 2)]], threadPages: { 1: LIMITED } }), rexSpider({ halt: false }), { core: five });
+  assert.deepEqual(requestsOf(late.events), ['home', 'list 0', 'page 1', 'home']);
+  assert.deepEqual([late.sent, five.memoWrites], [[], []]);
+  assert.deepEqual(five.backoffWrites.map((state) => state?.code), ['limited']);
+  assert.equal(withoutMs(late.outcome.reason), 'ok seen=2 dispatched=0 left=2 stop=limited');
+});
+
+// The limited rule counts the reads over the 3 hours before the read, not the
+// read budget's hour: right after a 60-minute limited back-off the reads that
+// met the limit are an hour old, and a limit still on must read as limited.
+test('the reads that make a page limited are the stored ones less than 3 hours old, this pass\'s own included; exactly 3 hours old do not count', async () => {
+  assert.equal(LIMITED_WINDOW_MS, 3 * 60 * MINUTE);
+  // The read is 60 s into the pass.
+  const at = (ms: number) => rexCore({ reads: Array.from({ length: 5 }, () => ms) });
+  const edge = at(NOW + 60_000 - 3 * 60 * MINUTE);
+  const old = await pass(site({ pages: [[thread(1, 1)]], threadPages: { 1: LIMITED } }), rexSpider({ halt: false }), { core: edge });
+  assert.deepEqual([kindsOf(old.sent), edge.backoffWrites], [[['1', true]], []]);
+  const inside = at(NOW + 60_000 - 3 * 60 * MINUTE + 1);
+  const young = await pass(site({ pages: [[thread(1, 1)]], threadPages: { 1: LIMITED } }), rexSpider({ halt: false }), { core: inside });
+  assert.deepEqual([young.sent, inside.backoffWrites.map((state) => state?.code)], [[], ['limited']]);
+  // One stored and four read in this pass make five before thread 5's read.
+  const pages = [[1, 2, 3, 4, 5].map((n) => thread(n, n))];
+  const own = rexCore({ reads: readsBefore(NOW, 1) });
+  const run = await pass(site({ pages, threadPages: { 5: LIMITED } }), rexSpider({ halt: false }), { core: own });
+  assert.deepEqual(readsOf(run.events), [1, 2, 3, 4]);
+  assert.deepEqual(own.backoffWrites.map((state) => state?.code), ['limited']);
+  assert.equal(withoutMs(run.outcome.reason), 'ok seen=5 dispatched=4 left=1 stop=limited');
+});
+
+test('right after a 60-minute limited back-off, with 15 reads stored 60 to 80 minutes before, a limited page still reads as limited, and the wait doubles', async () => {
+  // 15 reads 61 to 75 minutes before the pass's first read, 60 s in.
+  const reads = Array.from({ length: 15 }, (_, k) => NOW + 60_000 - (75 - k) * MINUTE);
+  assert.ok(reads.every((time) => NOW + 60_000 - time > 60 * MINUTE && NOW + 60_000 - time <= 80 * MINUTE), 'Test setup invalid: a read inside the hour');
+  const core = rexCore({ reads, backoff: { until: NOW - 1, failures: 1, code: 'limited' } });
+  const run = await pass(site({ pages: [[thread(1, 1), thread(2, 2)]], threadPages: { 1: LIMITED } }), rexSpider({ halt: false }), { core });
+  assert.deepEqual(requestsOf(run.events), ['home', 'list 0', 'page 1', 'home']);
+  assert.deepEqual([run.sent, core.memoWrites], [[], []]);
+  assert.deepEqual(core.backoffWrites, [{ until: run.clock() + 120 * MINUTE, failures: 2, code: 'limited' }]);
+  assert.equal(withoutMs(run.outcome.reason), 'ok seen=2 dispatched=0 left=2 stop=limited');
+});
+
+test('with only 4 reads in the 3 hours before it, a page with none of the four attributes is a layout failure', async () => {
+  const core = rexCore({ reads: [170, 120, 90, 30].map((minutes) => NOW - minutes * MINUTE) });
+  const run = await pass(site({ pages: [[thread(1, 1)]], threadPages: { 1: LIMITED } }), rexSpider({ halt: false }), { core });
+  assert.deepEqual(requestsOf(run.events), ['home', 'list 0', 'page 1', 'home']);
+  assert.deepEqual([kindsOf(run.sent), core.backoffWrites], [[['1', true]], []]);
+  assert.deepEqual(core.memoWrites.map(([id, memo]) => [short(id), memo.retryMs]), [['1', DAY]]);
+  assert.equal(withoutMs(run.outcome.reason), 'ok seen=1 dispatched=1 failed=1');
+});
+test('a page with none of the four attributes read as a layout failure still checks the home page: signed out ends the pass, with no summary', async () => {
+  const core = rexCore();
+  const run = await pass(site({ pages: [[thread(1, 1), thread(2, 2)]], home: (nth) => (nth === 1 ? SIGNED_IN : SIGNED_OUT), threadPages: { 1: LIMITED } }), rexSpider({ halt: false }), { core });
+  assert.deepEqual(requestsOf(run.events), ['home', 'list 0', 'page 1', 'home']);
+  assert.deepEqual([run.sent, core.memoWrites, core.backoffWrites], [[], [], []]);
+  assert.equal(withoutMs(run.outcome.reason), 'ok seen=2 dispatched=0 left=2 stop=not-signed-in');
+});
 
 test('a limited thread page stops the pass as limited after the home check: a 60-minute back-off, no summary, no memo, and the thread left for a later pass', async () => {
   const pages = [[thread(1, 1), thread(2, 2), thread(3, 3)]];
   const side = rexSpider({ halt: false });
-  const core = rexCore();
+  const core = afterReads();
   const run = await pass(site({ pages, threadPages: { 2: LIMITED } }), side, { core });
   assert.deepEqual(run.events, [
     'GET home', 'wait 30000', 'GET list 0',
@@ -1333,6 +1406,7 @@ test('each limited page in a row doubles the wait from 60 minutes, to at most 6 
   const waits: number[] = [];
   let now = NOW;
   for (let round = 0; round < 5; round += 1) {
+    core.held.reads = readsBefore(now);
     const run = await pass(site({ pages: [[thread(1, 1)]], threadPages: { 1: LIMITED } }), side, { core, now });
     assert.deepEqual(requestsOf(run.events), ['home', 'list 0', 'page 1', 'home'], `round ${round}`);
     assert.equal(withoutMs(run.outcome.reason), 'ok seen=1 dispatched=0 left=1 stop=limited', `round ${round}`);
@@ -1353,7 +1427,7 @@ test('a limited page whose home check says signed out ends the pass as not signe
     [failing(429), 'rate-limited', 'rate-limited'],
   ];
   for (const [check, stop, code] of cases) {
-    const core = rexCore();
+    const core = afterReads();
     const run = await pass(site({ pages: [[thread(1, 1), thread(2, 2)]], home: (nth) => (nth === 1 ? SIGNED_IN : check), threadPages: { 1: LIMITED } }), rexSpider({ halt: false }), { core });
     assert.deepEqual(requestsOf(run.events), ['home', 'list 0', 'page 1', 'home'], stop);
     assert.deepEqual([run.sent, core.memoWrites], [[], []], stop);
@@ -1371,7 +1445,7 @@ test('a limited page stops the pass even when the home check cannot tell (a 500,
     },
   ];
   for (const home of homes) {
-    const core = rexCore();
+    const core = afterReads();
     const run = await pass(site({ home, pages: [[thread(1, 1), thread(2, 2)]], threadPages: { 1: LIMITED } }), rexSpider({ halt: false }), { core });
     assert.deepEqual(requestsOf(run.events), ['home', 'list 0', 'page 1', 'home']);
     assert.deepEqual([run.sent, core.memoWrites], [[], []]);
@@ -1388,7 +1462,7 @@ test('a switch-off served in the wait before the home check after a limited page
   const pages = [[thread(1, 1), thread(2, 2)]];
   const offAfterPage1 = (web: ReturnType<typeof site>) => rexSpider({ halt: false, enabled: () => !web.requests.some((url) => label(url) === 'page 1') });
   const web = site({ pages, threadPages: { 1: LIMITED } });
-  const core = rexCore();
+  const core = afterReads();
   const run = await pass(web, offAfterPage1(web), { core });
   assert.deepEqual(requestsOf(run.events), ['home', 'list 0', 'page 1']);
   assert.deepEqual([run.sent, core.memoWrites], [[], []]);
@@ -1408,13 +1482,13 @@ test('a switch-off served in the wait before the home check after a limited page
 
 test('a limited page neither counts in the run of failed reads nor ends one as halt_on_error would', async () => {
   const pages = [[1, 2, 3, 4].map((n) => thread(n, n))];
-  const core = rexCore();
+  const core = afterReads();
   const run = await pass(site({ pages, folwrs: { 1: failing(500), 2: failing(500) }, threadPages: { 3: LIMITED } }), rexSpider({ halt: false }), { core });
   assert.deepEqual(requestsOf(run.events).slice(2), ['page 1', 'folwr 1', 'page 2', 'folwr 2', 'page 3', 'home']);
   assert.deepEqual(kindsOf(run.sent), [['1', true], ['2', true]]);
   assert.deepEqual(core.memoWrites.map(([id]) => short(id)), ['1', '2']);
   assert.equal(withoutMs(run.outcome.reason), 'ok seen=4 dispatched=2 failed=2 left=2 stop=limited');
-  const halting = await pass(site({ pages, threadPages: { 1: LIMITED } }), rexSpider({ halt: true }));
+  const halting = await pass(site({ pages, threadPages: { 1: LIMITED } }), rexSpider({ halt: true }), { core: afterReads() });
   assert.deepEqual(halting.sent, []);
   assert.equal(withoutMs(halting.outcome.reason), 'ok seen=4 dispatched=0 left=4 stop=limited');
 });

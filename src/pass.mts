@@ -28,7 +28,7 @@
 import type { DateString } from '@bric/rex-types/types';
 
 import { type BackoffCode, type BackoffState, backoffDecision, laterBackoff, nextBackoff } from './backoff.mts';
-import { READ_BUDGET, type ReadBudget, readsInWindow, withRead } from './budget.mts';
+import { LIMITED_AFTER_READS, LIMITED_WINDOW_MS, READ_BUDGET, type ReadBudget, readsInWindow, withRead } from './budget.mts';
 import { type Answer, type Client, RequestError, classify, retryAfterMs } from './client.mts';
 import { HOME_URL, isSignedIn } from './home.mts';
 import { uploadKeyId } from './keys.mts';
@@ -431,10 +431,12 @@ async function checkHome(pass: Pass): Promise<HomeCheck> {
 // The read budget, asked just before a thread's page request: spent when the
 // reads stored in its window have reached its count; store when the times
 // got no answer or the new one was not kept, since no read is made without
-// its time stored first; ok once this read's time is stored. A read counts
-// from its page request, whatever comes of it. Times of another form read as
-// none, and this read's time replaces them.
-async function spendRead(pass: Pass): Promise<'ok' | 'spent' | 'store'> {
+// its time stored first; once this read's time is stored, the count of reads
+// in the LIMITED_WINDOW_MS before it, which says whether a page with none of
+// the thread value attributes can be Google's limited page. A read counts from its page
+// request, whatever comes of it. Times of another form read as none, and this
+// read's time replaces them.
+async function spendRead(pass: Pass): Promise<{ readonly before: number } | 'spent' | 'store'> {
   const budget = pass.limits.readBudget;
   let times: readonly number[];
   try {
@@ -454,7 +456,7 @@ async function spendRead(pass: Pass): Promise<'ok' | 'spent' | 'store'> {
   }
   try {
     if ((await stored(pass, () => pass.deps.store.reads.set(withRead(times, now, budget)))).ok) {
-      return 'ok';
+      return { before: readsInWindow(times, now, { ...budget, windowMs: LIMITED_WINDOW_MS }) };
     }
   } catch {
     // Said below.
@@ -547,11 +549,18 @@ async function sendDetails(pass: Pass, due: readonly ListEntry[]): Promise<Sendi
       // halt_on_error as served now, for this thread's read.
       const halts = !framework.continueAfterError();
       const spend = await spendRead(pass);
-      if (spend !== 'ok') {
+      if (spend === 'spent' || spend === 'store') {
         stop = spend === 'spent' ? 'read-budget' : 'store';
         break;
       }
-      const read = await readDetail(pass, entry);
+      let read = await readDetail(pass, entry);
+      // Google's limit came only after many reads, so a page with none of the
+      // thread value attributes this early is taken for a change to Google's
+      // markup: a layout failure, with the summary in its place (budget.mts).
+      if (read.kind === 'failed' && read.why === 'limited' && spend.before < LIMITED_AFTER_READS) {
+        pass.say('a thread page held none of the thread value attributes after few reads; it counts as a layout failure');
+        read = { ...read, why: 'layout' };
+      }
       if (read.kind === 'record') {
         inARow = 0;
         if (memo.value !== null || memo.malformed) {
