@@ -31,6 +31,7 @@ import type { DateString } from '@bric/rex-types/types';
 import { type BackoffCode, type BackoffState, backoffDecision, laterBackoff, nextBackoff } from './backoff.mts';
 import { LIMITED_AFTER_READS, LIMITED_WINDOW_MS, READ_BUDGET, type ReadBudget, readsInWindow, withRead } from './budget.mts';
 import { type Answer, type Client, RequestError, classify, retryAfterMs } from './client.mts';
+import { isDataFormat } from './format.mts';
 import { HOME_URL, isSignedIn } from './home.mts';
 import { uploadKeyId } from './keys.mts';
 import { type ListEntry, type WalkResult, walkList } from './list.mts';
@@ -877,8 +878,15 @@ async function run(pass: Pass): Promise<PassOutcome> {
   }
   const served: Mode = framework.justSummarize() ? 'summary' : 'detail';
   // The data format, read once: every key, record and lookup of the pass is
-  // this format's, so a refresh during the pass changes the next one.
+  // this format's, so a refresh during the pass changes the next one. The
+  // spider hands in one it has checked, so one out of form is a wiring
+  // mistake: the pass stops here, before any request or store write, with
+  // count -1, so the reason reaches the crawl's issues.
   const format = framework.dataFormat();
+  if (!isDataFormat(format)) {
+    pass.say('the data format handed in is not a whole number from 1 to 999; the pass sends nothing');
+    return none(pass, 'internal', { stage: 'start' });
+  }
   // When this browser started running the served mode, written now if it
   // had not run it before (mode.mts). Taken before any request, so a pass
   // that finds the user signed out still dates a switch.

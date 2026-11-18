@@ -308,16 +308,18 @@ test('a block without data_format stamps today\'s ids and format 1; one with dat
   expect(completions(third)).toEqual([[0, threads.map((thread) => mtid(thread.n)), 'ok seen=3 dispatched=0']])
 })
 
-// A browser that ran detail mode long before, each thread sent in both modes
-// under format 1 and by the old spider: under data_format 2, every thread in
-// the window is read and sent again, the ones older than 90 days included.
+// A browser that started detail mode 2 days before, each thread sent in both
+// modes under format 1 and by the old spider: under data_format 2, every
+// thread in the window is read and sent again, the ones last used more than
+// 90 days before that start included. Were a format 1 key or the old one to
+// count, those two would count as sent.
 test('served detail and data_format 2, threads holding every format 1 key and the old spider\'s are all read and sent as format 2, stamped -detail-f2, and the next pass sends none', async ({ google, serviceWorker }) => {
   test.setTimeout(60_000)
   const now = Math.floor(Date.now() / 1000)
   const threads = [{ n: 1, updated: now - 3600 }, { n: 2, updated: now - 100 * DAY }, { n: 3, updated: now - 120 * DAY }]
   google.pages = [threads]
   await untilStoreOpen(serviceWorker)
-  expect(await storeValue(serviceWorker, 'rex-spider-google-ai-mode', { mode: 'detail', since: Date.now() - 400 * DAY * 1000 })).toBe(true)
+  expect(await storeValue(serviceWorker, 'rex-spider-google-ai-mode', { mode: 'detail', since: Date.now() - 2 * DAY * 1000 })).toBe(true)
   for (const thread of threads) {
     for (const id of [mtid(thread.n), `${mtid(thread.n)}-detail`, `${mstk(thread.n)}_${mtid(thread.n)}`]) {
       expect(await storeValue(serviceWorker, uploadKey(id, thread), Date.now())).toBe(true)
@@ -360,6 +362,25 @@ test('served data_format 2, a format 1 memo holds no thread back, and a layout f
   expect(await fetchValue(serviceWorker, `rex-spider-google-ai-detail-memo-${mtid(2)}`)).toEqual(memoOne)
   expect(await fetchValue(serviceWorker, `rex-spider-google-ai-detail-memo-${mtid(1)}-f2`)).toEqual({ ended: T * 1000, at: expect.any(Number), retryMs: 86_400_000, failures: 1 })
   expect(await fetchValue(serviceWorker, `rex-spider-google-ai-detail-memo-${mtid(1)}`)).toBeNull()
+})
+
+// The spider clamps a served data_format, so only a wiring mistake hands the
+// pass a format out of form; here dataFormat is replaced on the instance. The
+// pass stops before any request, and the reason goes in the crawl's issues.
+test('a data format out of form stops the pass at its start with no request, and its reason goes in the crawl\'s issues', async ({ google, serviceWorker }) => {
+  google.pages = [[{ n: 1, updated: T }]]
+  await untilStoreOpen(serviceWorker)
+  await configure(serviceWorker, { summarize: true })
+  await serviceWorker.evaluate(() => { self.rexGoogleAIPlugin.dataFormat = () => 0 })
+
+  const round = await crawl(serviceWorker)
+  expect(google.requests).toEqual([])
+  expect(records(round)).toEqual([])
+  const [reason] = reasons(round)
+  expect(reason).toMatch(/^internal stage=start ms=\d+$/)
+  expect(completions(round)).toEqual([[-1, [], 'internal stage=start']])
+  expect(round.result).toEqual({ sitesCrawled: ['google-ai'], issues: [{ url: LOGIN, message: reason }] })
+  expect(await fetchValue(serviceWorker, 'rex-spider-google-ai-mode')).toBeNull()
 })
 
 test('signed out, the pass ends at the home page with count -1, its reason in the issues, no list request and no back-off', async ({ google, serviceWorker }) => {

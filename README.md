@@ -2,7 +2,7 @@
 
 The Google AI Mode crawler for a research browser extension (this fork of bric-digital's `rex-spider-google-ai`). While a participant's browser is open and signed in to Google, it reads the list of their AI Mode threads with their own sign-in and uploads one record for each new or changed thread. A summary record holds the thread's two list times, ten small integers from the list and a hash of its title. A detail record adds two turns per exchange, the question's and the answer's, with counts made in the browser: characters, words and citations. No record holds a title or message text. Records follow the conversation record layout the ChatGPT and Gemini forks also use, and carry the data format the extension serves (see "The data format").
 
-**Where it stands, 2026-11-17.** This README describes `main` at `3cee8e8`. The extension's release v0.0.59 installs bric-digital's crawler at `089c890` instead. That crawler sends one list record per thread with the whole list entry as `metadata` and `<mstk>_<mtid>` as `identifier`, and has no detail mode. This fork reaches participants only in a release that pins it.
+**Where it stands, 2026-11-18.** The extension's release v0.0.59 installs bric-digital's crawler at `089c890`, not this fork. That crawler sends one list record per thread with the whole list entry as `metadata` and `<mstk>_<mtid>` as `identifier`, and has no detail mode. The extension's `main` pins this fork at `47707d4`, which no release ships yet. `main` is newer: it adds the data format (see "The data format"), which arrives with the extension's next pin of this fork. This fork reaches participants only in a release that pins it.
 
 ## What it collects
 
@@ -15,7 +15,7 @@ Never collected: the title (only its hash), question and answer text (only count
 
 ## How a pass works
 
-rex-spider starts a pass on a crawl round when none is running and `sleep_delay` has passed since the last one. The spider says it is crawling from the moment a pass starts, so a round while one runs starts none and rex-spider sends `[google-ai] Still crawling.` (`src/spider.mts:39-43, 68-71`).
+rex-spider starts a pass on a crawl round when none is running and `sleep_delay` has passed since the last one. The spider says it is crawling from the moment a pass starts, so a round while one runs starts none and rex-spider sends `[google-ai] Still crawling.` (`src/spider.mts:39-43, 70-73`).
 
 1. If a back-off is running (see "When something fails"), end with `backoff` and make no request.
 2. Read and, on a switch, write the mode record (see "Modes and the re-send"), and look up the crawl window.
@@ -91,14 +91,14 @@ A stream with no turn block, or none whose answer body is found, gives no detail
 
 ## Modes and the re-send
 
-`summarize: true` is summary mode; absent or `false` is detail mode, so with no `summarize` served the crawler runs detail mode. The spider takes `summarize` and `halt_on_error` again, in both directions, at every configuration refresh with a `google-ai` or `default` block. It checks them before each thread: a mode change during a pass ends the sending, and the next pass runs in the new mode (`src/spider.mts:45-66`).
+`summarize: true` is summary mode; absent or `false` is detail mode, so with no `summarize` served the crawler runs detail mode. The spider takes `summarize` and `halt_on_error` again, in both directions, at every configuration refresh with a `google-ai` or `default` block. It checks them before each thread: a mode change during a pass ends the sending, and the next pass runs in the new mode (`src/spider.mts:45-68`).
 
 Each mode has its own upload key, which rex-spider stores as `rex-spider-google-ai-conversation-upload-<id>-<ms>` with the thread's last use in ms (`src/keys.mts`). Under data format 1 the id is the bare `mtid` in summary mode and `<mtid>-detail` in detail mode; under a later format `n` both end in `-f<n>`, such as `<mtid>-detail-f2`. The spider stores the served mode and when this browser's first pass in it ran (`rex-spider-google-ai-mode`).
 
 The re-send rule (`src/mode.mts`), within one data format:
 - A thread with a key in the served mode at its current last use is not sent again. One with no key in either mode is sent.
 - A thread with a key only in the other mode, or (under format 1 only) only under bric-digital's old key (`<mstk>_<mtid>`), is sent again, once, if it was last used no earlier than 90 days before this browser's first pass in the served mode. Older threads keep the record they have.
-- A browser with no stored mode counts as switching on its first pass. So after the update, the threads used in the 90 days before go out once more in the served mode, and in detail mode the read budget spreads them over several hours.
+- A browser with no stored mode counts as switching on its first pass. Under format 1, the update from bric-digital's crawler therefore sends once more, in the served mode, the threads used in the 90 days before it. A browser whose first pass with this fork runs a later data format sends its whole crawl window instead (see "The data format").
 - While the mode record cannot be read or written, threads sent only in the other mode are held back for a later pass.
 
 ## The data format
@@ -106,10 +106,12 @@ The re-send rule (`src/mode.mts`), within one data format:
 The extension serves one number, `data_format`, in every spider block, the same for all its crawlers. The spider reads it at every refresh: a whole number from 1 to 999, else 1, so a config with none runs as before (`src/format.mts`, `src/spider.mts`). A pass reads it once at its start, stamps it on each record as `format_version` and builds it into each upload key.
 
 - Format 1 keeps the keys the spider has always had, and the old crawler's key still counts as sent in the other mode.
-- Under a later format no key of an earlier one counts, the old crawler's included. So the first passes after the number changes send every thread in the crawl window once more, in the served mode, whatever its age; then only new or changed threads, as before. In detail mode the read budget (15 an hour) spreads that over several hours.
-- The fallback summary of a failed read is skipped only when the summary key of the pass's format is held.
+- Under a later format no key of an earlier one counts, the old crawler's included. So the first passes after the number changes send every thread in the crawl window once more, in the served mode, whatever its age, not only the last 90 days; then only new or changed threads, as before. In detail mode that goes at the read budget's 15 thread reads an hour: 60 threads take about 4 hours, 500 about 33.
+- The fallback summary of a failed read goes out as before, once per last use at the thread's first failure, unless one went out at that time; the summary key it looks for is the pass's format's, so another format's never holds it back.
 - A failed read's memo is the format's own too (`-f<n>` after the key under a later format), so a memo written under an earlier format neither holds a thread back nor counts as a failure.
 - The mode record does not change with the format. A switch of mode under one format re-sends as above.
+- Upload keys and memos of an earlier format stay in the extension's store after a change. Nothing reads, writes or clears them again, so they hold nothing back; each is one small value per thread sent, or per thread whose read failed.
+- A pass handed a format out of form, which only a wiring mistake can do since the spider clamps what it is served, stops before any request as `internal stage=start`, so the reason reaches the crawl's issues (`src/pass.mts`).
 
 ## What is removed, and how
 
@@ -147,7 +149,7 @@ The hash uses no secret key, so someone who guesses a title exactly can confirm 
 Each pass sends one event, `rex-spider-google-ai-complete`, with `crawled_count`, `crawled_ids` and `reason`.
 
 - Only `ok` and `none` come with a count of 0 or more: the records sent, and the `mtid` of every thread listed in the crawl window.
-- Every other reason comes with -1 and no ids, so a list read in part never looks like deleted threads, and the spider also puts it in the crawl's issues (`src/spider.mts:140-142`).
+- Every other reason comes with -1 and no ids, so a list read in part never looks like deleted threads, and the spider also puts it in the crawl's issues (`src/spider.mts:142-144`).
 - A reason is a code followed by `key=value` fields, never free text (`src/reasons.mts`), such as `ok seen=40 dispatched=15 left=25 stop=read-budget ms=1350000` (made-up numbers).
 
 | code | meaning |

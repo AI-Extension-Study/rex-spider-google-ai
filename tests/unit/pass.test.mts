@@ -859,15 +859,17 @@ test('after a format 1 pass sent every thread, a format 2 pass sends every threa
   }
 });
 
-// The pilot browsers' case: the served mode ran long before, and each thread
-// holds both modes' format 1 keys and the old spider's.
+// The pilot browsers' case: the served mode started 2 days before, and each
+// thread holds both modes' format 1 keys and the old spider's. Were either
+// to count, the threads last used more than 90 days before that start (95
+// and 300 days old here) would count as sent and stay out.
 test('under format 2, threads holding every format 1 key and the legacy key all go out, however old, and no legacy key is looked up', async () => {
   for (const summarize of [true, false]) {
     const mode = summarize ? 'summary' : 'detail';
     const ages: Record<number, number> = { 1: 2, 2: 95, 3: 300 };
     const keys = [1, 2, 3].flatMap((n) => [keyOf(n, ages[n], 'summary'), keyOf(n, ages[n], 'detail'), legacyKeyOf(n, ages[n])]);
     const side = rexSpider({ summarize, format: 2, keys });
-    const core = rexCore({ mode: { mode, since: NOW - 400 * DAY } });
+    const core = rexCore({ mode: { mode, since: NOW - 2 * DAY } });
     const run = await pass(site({ pages: [[thread(1, 2), thread(2, 95), thread(3, 300)]] }), side, { core });
     assert.deepEqual(formatsOf(run.sent), [['1', summarize, 2], ['2', summarize, 2], ['3', summarize, 2]], mode);
     assert.deepEqual(side.stamps, [1, 2, 3].map((n) => keyOf(n, ages[n], mode, 2)), mode);
@@ -978,13 +980,20 @@ test('under format 2, a read that works clears the format 2 memo, and only that 
 });
 
 // The spider hands in a format it has checked; one that is not a whole
-// number from 1 to 999 is a wiring mistake, and nothing goes out under it.
-test('a data format that is not a whole number from 1 to 999 sends nothing: the key lookups fail and the pass stops as internal', async () => {
+// number from 1 to 999 is a wiring mistake. The pass stops at its start, with
+// no request and no store write, and count -1, so the spider puts the reason
+// in the crawl's issues on every pass until it is fixed.
+test('a data format that is not a whole number from 1 to 999 stops the pass at its start as internal: no request, no store write, count -1', async () => {
   for (const format of [0, 1.5, 1000, NaN, undefined]) {
     for (const summarize of [true, false]) {
-      const run = await pass(site({ pages: [[thread(1, 1)]] }), rexSpider({ summarize, format: () => format as number }));
-      assert.deepEqual([run.sent, readsOf(run.events)], [[], []], `${String(format)}, summarize ${summarize}`);
-      assert.equal(withoutMs(run.outcome.reason), 'ok seen=1 dispatched=0 stop=internal', `${String(format)}, summarize ${summarize}`);
+      const what = `${String(format)}, summarize ${summarize}`;
+      const side = rexSpider({ summarize, format: () => format as number });
+      const core = rexCore();
+      const run = await pass(site({ pages: [[thread(1, 1)]] }), side, { core });
+      assert.deepEqual(requestsOf(run.events), [], what);
+      assert.deepEqual([run.sent, side.stamps, side.lookups, core.writes, core.memoWrites], [[], [], [], [], []], what);
+      assert.deepEqual([run.outcome.count, run.outcome.ids, withoutMs(run.outcome.reason)], [-1, [], 'internal stage=start'], what);
+      assert.deepEqual(run.lines, ['the data format handed in is not a whole number from 1 to 999; the pass sends nothing'], what);
     }
   }
 });

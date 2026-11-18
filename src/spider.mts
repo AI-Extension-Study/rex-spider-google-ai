@@ -49,8 +49,10 @@ export class GoogleAISpider extends REXSpider {
     super.updateConfiguration(configuration);
     this.summarizes = configuration.summarize === true;
     this.haltsOnError = configuration.halt_on_error !== false;
-    // rex-spider's config type has no data_format, so it is read as unknown.
-    this.dataFormatServed = dataFormatOf('data_format' in configuration ? configuration.data_format : undefined);
+    // rex-spider's config type has no data_format, so it is read as unknown,
+    // as a property like the keys above: rex-spider hands on a served block
+    // that is not an object as it is, and the in operator would throw on it.
+    this.dataFormatServed = dataFormatOf((configuration as { data_format?: unknown }).data_format);
   }
 
   justSummarize(): boolean {

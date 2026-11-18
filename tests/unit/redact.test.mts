@@ -6,6 +6,7 @@ import { isDeepStrictEqual } from 'node:util';
 
 import { DateString } from '@bric/rex-types/types';
 
+import { isDataFormat } from '../../src/format.mts';
 import { LIST_NUMBER_KEYS, type ListEntry, parseListPage } from '../../src/list.mts';
 import { type AimTurn, type DetailOptions, type ParsedThread, buildDetailRecord, buildSummaryRecord } from '../../src/record.mts';
 import { redactGoogleAiMode } from '../../src/redact.mts';
@@ -290,6 +291,28 @@ test('a record of one format is cut to the scaffold when another is accepted: fo
 // leaves it out, or hands in another form, lets no record through: not one
 // without a format_version, as the old crawler's points are, nor one whose
 // format_version is that same value.
+// The redactor holds its own copy of the data format's range, since it may
+// import nothing but rex-types and keep.mts (the extension renders the two).
+// The copy must be format.mts's: with the extension's format accepted, a
+// record of it is kept exactly when the spider can be served that format.
+// A lower bound in the copy would cut every record of a later format.
+test('the redactor keeps a record of the accepted format exactly when format.mts takes that format', () => {
+  const values = [1, 2, 3, 500, 998, 999, 1000, 0, 1.5];
+  assert.ok(values.some(isDataFormat) && values.some((value) => !isDataFormat(value)), 'Test setup invalid: both answers must occur');
+  const wrong: string[] = [];
+  for (const value of values) {
+    for (const [what, record] of [['summary', summaryOf(listEntry(), value)], ['detail', detailOf(listEntry(), thread(SMALL), undefined, value)]] as const) {
+      const out = redact(record, value);
+      const kept = isDeepStrictEqual(plain(out), plain(record)) && wire(out) === wire(record);
+      const cut = isDeepStrictEqual(out, scaffoldOf(record));
+      if (kept !== isDataFormat(value) || cut === isDataFormat(value)) {
+        wrong.push(`${what} of format ${value}: kept ${kept}, cut ${cut}, format.mts takes it ${isDataFormat(value)}`);
+      }
+    }
+  }
+  assert.deepEqual(wrong, []);
+});
+
 test('an accepted format that is not a whole number from 1 to 999 accepts no record, even one stamped with that same value', () => {
   const cases: Array<[string, unknown, Json]> = [];
   for (const format of [undefined, null, 0, -1, 1.5, NaN, 1000, '1', '2', true]) {
