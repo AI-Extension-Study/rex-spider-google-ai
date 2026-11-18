@@ -183,7 +183,7 @@ rex-spider merges `spider.spiders.google-ai` over `spider.spiders.default` from 
 CI uses Node 24.11 (`.github/workflows/ci.yml`).
 
 - `npm ci`, then `npm run build` (`tsc`, type checks only) and `npm run lint`.
-- `npm run test:unit` runs Node's test runner on `tests/unit`, with no browser.
+- `npm run test:unit` runs Node's test runner on `tests/unit`, with no browser. It fails when its glob matches no test file (`tests/require-unit-tests.mjs`), since `node --test` alone passes then.
 - `npm run test:specs` builds a test extension and runs the Playwright specs in Chromium:
   - `tests/specs/crawl.spec.ts` runs whole passes in a real service worker, with www.google.com answered by routes and every id, title and text made up;
   - `tests/specs/spider.spec.ts` checks the module's registration, its flags and its allow patterns as Chrome rules;

@@ -24,9 +24,9 @@
     },
     "scripts": {
         "build": "tsc",
-        "lint": "eslint src tests/unit tests/strip-node-modules-types.mjs",
+        "lint": "eslint src tests/unit tests/strip-node-modules-types.mjs tests/require-unit-tests.mjs",
         "test": "npm run test:unit && npm run test:specs",
-        "test:unit": "node --disable-warning=ExperimentalWarning --import ./tests/strip-node-modules-types.mjs --test --test-timeout=60000 'tests/unit/**/*.test.mts'",
+        "test:unit": "node --disable-warning=ExperimentalWarning tests/require-unit-tests.mjs 'tests/unit/**/*.test.mts' && node --disable-warning=ExperimentalWarning --import ./tests/strip-node-modules-types.mjs --test --test-timeout=60000 'tests/unit/**/*.test.mts'",
         "pretest:specs": "node tests/scripts/build-test-bundle.js",
         "test:specs": "playwright test",
         "test:ci": "npm run test:unit && npm run pretest:specs && playwright test --reporter=dot",
