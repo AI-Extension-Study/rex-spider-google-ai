@@ -66,10 +66,11 @@ export interface AimStore {
     get(deadlineMs?: number): Promise<Read<BackoffState>>;
     set(state: BackoffState | null): Promise<Write>;
   };
+  // Per thread and data format (keys.mts, memoKey).
   readonly memo: {
-    get(mtid: string): Promise<Read<DetailMemo>>;
-    set(mtid: string, memo: DetailMemo): Promise<Write>;
-    clear(mtid: string): Promise<Write>;
+    get(mtid: string, format: number): Promise<Read<DetailMemo>>;
+    set(mtid: string, memo: DetailMemo, format: number): Promise<Write>;
+    clear(mtid: string, format: number): Promise<Write>;
   };
   // The epoch ms at which recent thread reads started, oldest first, which
   // the read budget counts (budget.mts). The pass writes the whole list, kept
@@ -177,12 +178,12 @@ export function createStore(handleMessage: HandleMessage, { deadlineMs = STORE_D
       get: () => typed(READS_KEY, isReadTimes),
       set: (times) => set(READS_KEY, times),
     },
-    // async, so that a bad mtid rejects rather than throws.
+    // async, so that a bad mtid or format rejects rather than throws.
     memo: {
-      get: async (mtid) => typed(memoKey(mtid), isDetailMemo),
-      set: async (mtid, memo) => set(memoKey(mtid), memo),
+      get: async (mtid, format) => typed(memoKey(mtid, format), isDetailMemo),
+      set: async (mtid, memo, format) => set(memoKey(mtid, format), memo),
       // rex-core has no delete; null reads back as nothing.
-      clear: async (mtid) => set(memoKey(mtid), null),
+      clear: async (mtid, format) => set(memoKey(mtid, format), null),
     },
   };
 }

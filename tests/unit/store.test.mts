@@ -92,7 +92,7 @@ test('a read that never gets an answer stays flagged through the mode and memo r
     }) as unknown as HandleMessage;
     const store = createStore(silent, { deadlineMs: 20, log: quiet });
     assert.deepEqual(await store.mode.get(), { value: null, unanswered: true, malformed: false }, `handled: ${handled}`);
-    assert.deepEqual(await store.memo.get(MTID), { value: null, unanswered: true, malformed: false }, `handled: ${handled}`);
+    assert.deepEqual(await store.memo.get(MTID, 1), { value: null, unanswered: true, malformed: false }, `handled: ${handled}`);
     asked.length = 0;
     assert.equal(await resendSince(store, 'detail', 1700000000000), null, `handled: ${handled}`);
     assert.deepEqual(asked, ['fetchValue rex-spider-google-ai-mode'], `handled: ${handled}`);
@@ -138,13 +138,40 @@ test('a detail memo reads back as written, and clearing it writes null', async (
   const core = rexCore();
   const store = createStore(core.handleMessage, { log: quiet });
   const memo = { ended: 1700000000000, at: 1700000100000, retryMs: 86_400_000, failures: 1 };
-  await store.memo.set(MTID, memo);
-  assert.deepEqual(await store.memo.get(MTID), { value: memo, unanswered: false, malformed: false });
-  await store.memo.clear(MTID);
-  assert.equal(core.values.get(memoKey(MTID)), null);
-  assert.deepEqual(await store.memo.get(MTID), { value: null, unanswered: false, malformed: false });
-  core.values.set(memoKey(OTHER_MTID), { ended: 1, at: 1, retryMs: 0, failures: 1 });
-  assert.deepEqual(await store.memo.get(OTHER_MTID), { value: null, unanswered: false, malformed: true });
+  await store.memo.set(MTID, memo, 1);
+  assert.deepEqual(await store.memo.get(MTID, 1), { value: memo, unanswered: false, malformed: false });
+  await store.memo.clear(MTID, 1);
+  assert.equal(core.values.get(memoKey(MTID, 1)), null);
+  assert.deepEqual(await store.memo.get(MTID, 1), { value: null, unanswered: false, malformed: false });
+  core.values.set(memoKey(OTHER_MTID, 1), { ended: 1, at: 1, retryMs: 0, failures: 1 });
+  assert.deepEqual(await store.memo.get(OTHER_MTID, 1), { value: null, unanswered: false, malformed: true });
+});
+
+test('under format 2 a memo is written, read and cleared under its own key, and format 1\'s memo is neither read nor touched', async () => {
+  const core = rexCore();
+  const store = createStore(core.handleMessage, { log: quiet });
+  const one = { ended: 1700000000000, at: 1700000100000, retryMs: 604_800_000, failures: 2 };
+  const two = { ended: 1700000000000, at: 1700000200000, retryMs: 86_400_000, failures: 1 };
+  await store.memo.set(MTID, one, 1);
+  assert.deepEqual(await store.memo.get(MTID, 2), { value: null, unanswered: false, malformed: false });
+  await store.memo.set(MTID, two, 2);
+  assert.deepEqual(core.values.get(`rex-spider-google-ai-detail-memo-${MTID}-f2`), two);
+  assert.deepEqual(await store.memo.get(MTID, 2), { value: two, unanswered: false, malformed: false });
+  await store.memo.clear(MTID, 2);
+  assert.equal(core.values.get(`rex-spider-google-ai-detail-memo-${MTID}-f2`), null);
+  assert.deepEqual(core.values.get(`rex-spider-google-ai-detail-memo-${MTID}`), one);
+  assert.deepEqual(await store.memo.get(MTID, 1), { value: one, unanswered: false, malformed: false });
+});
+
+test('a memo call with a data format out of form rejects, and stores nothing', async () => {
+  const core = rexCore();
+  const store = createStore(core.handleMessage, { log: quiet });
+  for (const format of [0, 1.5, 1000, NaN, undefined]) {
+    await assert.rejects(store.memo.get(MTID, format as unknown as number), TypeError, String(format));
+    await assert.rejects(store.memo.set(MTID, { ended: 1, at: 1, retryMs: 1, failures: 1 }, format as unknown as number), TypeError, String(format));
+    await assert.rejects(store.memo.clear(MTID, format as unknown as number), TypeError, String(format));
+  }
+  assert.equal(core.values.size, 0);
 });
 
 test('the back-off reads back as written, clearing it writes null, and anything else stored there reads as absent and malformed', async () => {
@@ -204,8 +231,10 @@ test('a back-off that gets no answer is flagged, and counts as none', { timeout:
 test('log lines name a key\'s kind, never the thread id in it', { timeout: 2000 }, async () => {
   const lines: string[] = [];
   const store = createStore(rexCore({ open: false }).handleMessage, { deadlineMs: 20, log: (line) => lines.push(line) });
-  await store.memo.get(MTID);
-  await store.memo.set(MTID, { ended: 1, at: 1, retryMs: 1, failures: 1 });
+  await store.memo.get(MTID, 1);
+  await store.memo.set(MTID, { ended: 1, at: 1, retryMs: 1, failures: 1 }, 1);
+  await store.memo.get(MTID, 2);
+  await store.memo.set(MTID, { ended: 1, at: 1, retryMs: 1, failures: 1 }, 2);
   assert.ok(lines.length >= 2, 'Test setup invalid: nothing was logged, so the absence below would mean nothing');
   assert.ok(lines.every((line) => !line.includes(MTID)), lines.join('\n'));
   assert.ok(lines.every((line) => line.includes('rex-spider-google-ai-detail-memo')), lines.join('\n'));
@@ -262,8 +291,8 @@ test('memo fields of the wrong form, and arrays dressed as records, read as malf
   const store = createStore(core.handleMessage, { log: quiet });
   const good = { ended: 1700000000000, at: 1700000100000, retryMs: 86_400_000, failures: 1 };
   for (const bad of [{ ...good, failures: 0 }, { ...good, ended: -1 }, { ...good, at: 1.5 }, Object.assign([], good)]) {
-    core.values.set(memoKey(MTID), bad);
-    assert.deepEqual(await store.memo.get(MTID), { value: null, unanswered: false, malformed: true }, JSON.stringify(bad));
+    core.values.set(memoKey(MTID, 1), bad);
+    assert.deepEqual(await store.memo.get(MTID, 1), { value: null, unanswered: false, malformed: true }, JSON.stringify(bad));
   }
   core.values.set('rex-spider-google-ai-mode', Object.assign([], { mode: 'summary', since: 1 }));
   assert.deepEqual(await store.mode.get(), { value: null, unanswered: false, malformed: true });

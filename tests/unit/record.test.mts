@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import { DateString } from '@bric/rex-types/types';
 
 import { LIST_NUMBER_KEYS, type ListEntry } from '../../src/list.mts';
-import { type AimRecord, type AimTurn, type DetailOptions, FORMAT_VERSION, MAX_TURNS, type ParsedThread, TURNS_JSON_LIMIT, buildDetailRecord, buildSummaryRecord, hashTitle } from '../../src/record.mts';
+import { type AimRecord, type AimTurn, type DetailOptions, MAX_TURNS, type ParsedThread, TURNS_JSON_LIMIT, buildDetailRecord, buildSummaryRecord, hashTitle } from '../../src/record.mts';
 import { ANSWER_MARKER, CREATED_S, MARKERS, MSTK, MTID, TITLE, TITLE_HASH, UPDATED_S, URL_MARKER, assistantTurn, listEntry, numberedTurns, thread, userTurn } from './fixtures.mts';
 
 type Json = Record<string, unknown>;
@@ -35,19 +35,18 @@ function clean(record: AimRecord): AimRecord {
   return record;
 }
 
-async function summaryOf(entry: ListEntry): Promise<AimRecord> {
-  return clean(buildSummaryRecord(entry, await hashTitle(entry.title, sha256)));
+async function summaryOf(entry: ListEntry, format = 1): Promise<AimRecord> {
+  return clean(buildSummaryRecord(entry, await hashTitle(entry.title, sha256), format));
 }
 
-async function detailOf(entry: ListEntry, parsed: ParsedThread, options?: DetailOptions): Promise<AimRecord> {
-  return clean(buildDetailRecord(entry, await hashTitle(entry.title, sha256), parsed, options));
+async function detailOf(entry: ListEntry, parsed: ParsedThread, options?: DetailOptions, format = 1): Promise<AimRecord> {
+  return clean(buildDetailRecord(entry, await hashTitle(entry.title, sha256), parsed, options, format));
 }
 
 // A two-question thread: each question and its answer.
 const SMALL = [userTurn(12, 3), assistantTurn(840, 131, 6), userTurn(25, 5), assistantTurn(1203, 188, 0)];
 
-test('the format version is 1 and the caps are 1,000 turns and 512 KB of JSON', () => {
-  assert.equal(FORMAT_VERSION, 1);
+test('the caps are 1,000 turns and 512 KB of JSON', () => {
   assert.equal(MAX_TURNS, 1000);
   assert.equal(TURNS_JSON_LIMIT, 512 * 1024);
 });
@@ -138,10 +137,10 @@ test('a summary of an entry with no title, or an empty one, has a null title has
 test('a title hash handed in that is not a SHA-256 in lowercase hex goes out as null, so the title itself never does', () => {
   const entry = listEntry();
   for (const handed of [TITLE, entry.title, TITLE_HASH.toUpperCase(), TITLE_HASH.slice(2), '']) {
-    assert.equal(clean(buildSummaryRecord(entry, handed)).metadata.title_hash, null, handed ?? 'null');
-    assert.equal(clean(buildDetailRecord(entry, handed, thread(SMALL))).metadata.title_hash, null, handed ?? 'null');
+    assert.equal(clean(buildSummaryRecord(entry, handed, 1)).metadata.title_hash, null, handed ?? 'null');
+    assert.equal(clean(buildDetailRecord(entry, handed, thread(SMALL), {}, 1)).metadata.title_hash, null, handed ?? 'null');
   }
-  assert.equal(clean(buildSummaryRecord(entry, TITLE_HASH)).metadata.title_hash, TITLE_HASH);
+  assert.equal(clean(buildSummaryRecord(entry, TITLE_HASH, 1)).metadata.title_hash, TITLE_HASH);
 });
 
 test('list_numbers keeps an integer from 0 to 999 and nulls anything else, text included', async () => {
@@ -194,6 +193,27 @@ test('the detail record of a list entry and its thread: every key and value', as
     assert.deepEqual(Object.keys(turn), TURN_KEYS);
   }
   assert.ok(record.started instanceof DateString && record.ended instanceof DateString);
+});
+
+// The data format is the pass's, handed in; the records differ in it alone.
+test('a record carries the data format it was built with as format_version, and nothing else of it changes', async () => {
+  const entry = listEntry();
+  const summaryOne = uploaded(await summaryOf(entry, 1));
+  const detailOne = uploaded(await detailOf(entry, thread(SMALL), undefined, 1));
+  assert.deepEqual([summaryOne.format_version, detailOne.format_version], [1, 1]);
+  for (const format of [2, 3, 999]) {
+    const summary = await summaryOf(entry, format);
+    const detail = await detailOf(entry, thread(SMALL), undefined, format);
+    assert.deepEqual(uploaded(summary), { ...summaryOne, format_version: format }, `summary, format ${format}`);
+    assert.deepEqual(uploaded(detail), { ...detailOne, format_version: format }, `detail, format ${format}`);
+    assert.deepEqual(Object.keys(summary), RECORD_KEYS);
+    assert.deepEqual(Object.keys(detail), DETAIL_RECORD_KEYS);
+  }
+});
+
+test('a detail record built with caps and format 2 keeps both', async () => {
+  const record = uploaded(await detailOf(listEntry(), thread(numberedTurns(10)), { maxTurns: 4 }, 2));
+  assert.deepEqual([record.format_version, (record.turns as unknown[]).length, record.turns_complete], [2, 4, false]);
 });
 
 test('a detail record\'s date is its started in epoch ms, not its ended', async () => {
@@ -430,7 +450,7 @@ test('no record holds the title, the mstk, the answer text at [14], the URL at [
   const entries = [listEntry(), listEntry({ 6: null }), listEntry({ 2: [URL_MARKER, 'TEXT-MARKER-24'], 14: [[ANSWER_MARKER]], 30: 'TEXT-MARKER-24' })];
   for (const entry of entries) {
     const title = await hashTitle(entry.title, sha256);
-    for (const record of [buildSummaryRecord(entry, title), buildDetailRecord(entry, title, thread(SMALL)), buildDetailRecord(entry, title, thread(numberedTurns(1001)))]) {
+    for (const record of [buildSummaryRecord(entry, title, 1), buildDetailRecord(entry, title, thread(SMALL), {}, 1), buildDetailRecord(entry, title, thread(numberedTurns(1001)), {}, 1)]) {
       const text = JSON.stringify(record);
       for (const marker of MARKERS) {
         assert.equal(text.includes(marker), false, `${marker} in a ${record.is_summary ? 'summary' : 'detail'} record`);

@@ -54,6 +54,77 @@ test('the same holds through rex-spider\'s own refresh, which merges the default
   expect(seen).toEqual([[true, true], [false, true], [false, true], [false, false]])
 })
 
+// The extension serves its data format as data_format in every spider block.
+// Read at every update like summarize: a block without it, or with a value
+// that is not a whole number from 1 to 999, is format 1, as before.
+test('data_format takes effect both ways on every configuration update, and any other value than 1 to 999 reads as format 1', async ({ serviceWorker }) => {
+  const seen = await serviceWorker.evaluate(() => {
+    const spider = self.rexGoogleAIPlugin
+    const formats = [spider.dataFormat()]
+    for (const configuration of [{ data_format: 2 }, {}, { data_format: 999 }, { data_format: 3, summarize: true }, { summarize: true }]) {
+      spider.updateConfiguration(configuration)
+      formats.push(spider.dataFormat())
+    }
+    const others = []
+    for (const value of [0, -1, 1.5, '2', null, 1000, true]) {
+      spider.updateConfiguration({ data_format: 2 })
+      spider.updateConfiguration({ data_format: value })
+      others.push(spider.dataFormat())
+    }
+    return { formats, others }
+  })
+  expect(seen).toEqual({ formats: [1, 2, 1, 999, 3, 1], others: [1, 1, 1, 1, 1, 1, 1] })
+})
+
+test('data_format reaches the spider through rex-spider\'s refresh, from the default block or the spider\'s own, the spider\'s winning', async ({ serviceWorker }) => {
+  const seen = await serviceWorker.evaluate(() => {
+    const spider = self.rexGoogleAIPlugin
+    const refresh = (spiders) => self.rexSpiderPlugin.updateConfiguration({ spiders })
+    const formats = []
+    for (const spiders of [
+      { default: { enabled: true, data_format: 2 }, 'google-ai': { enabled: true } },
+      { default: { enabled: true }, 'google-ai': { enabled: true } },
+      { default: { enabled: true, data_format: 2 } },
+      { default: { enabled: true, data_format: 2 }, 'google-ai': { enabled: true, data_format: 3 } },
+      { 'google-ai': { enabled: true } },
+    ]) {
+      refresh(spiders)
+      formats.push(spider.dataFormat())
+    }
+    return formats
+  })
+  expect(seen).toEqual([2, 1, 2, 3, 1])
+})
+
+// With no google-ai block rex-spider hands the spider the default block as
+// served, whatever it is. rex-spider reads its keys as properties, so a block
+// that is a string, a number or a flag goes through it; the data format is
+// read the same way, as format 1, and does not end the refresh.
+test('a served block that is not an object reads as format 1 and does not throw, directly or through rex-spider\'s refresh', async ({ serviceWorker }) => {
+  const seen = await serviceWorker.evaluate(() => {
+    const spider = self.rexGoogleAIPlugin
+    const outcomes = []
+    for (const block of ['x', 7, true]) {
+      spider.updateConfiguration({ data_format: 2 })
+      try {
+        spider.updateConfiguration(block)
+        outcomes.push(spider.dataFormat())
+      } catch (error) {
+        outcomes.push(String(error))
+      }
+      spider.updateConfiguration({ data_format: 2 })
+      try {
+        self.rexSpiderPlugin.updateConfiguration({ spiders: { default: block } })
+        outcomes.push(spider.dataFormat())
+      } catch (error) {
+        outcomes.push(String(error))
+      }
+    }
+    return outcomes
+  })
+  expect(seen).toEqual([1, 1, 1, 1, 1, 1])
+})
+
 test('a served enabled false and crawl_delay reach the spider, directly and through rex-spider\'s refresh', async ({ serviceWorker }) => {
   const seen = await serviceWorker.evaluate(() => {
     const spider = self.rexGoogleAIPlugin

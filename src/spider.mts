@@ -1,6 +1,6 @@
 // The spider rex-spider runs for Google AI Mode: its name, the URLs the
-// extension lets it reach, the served mode and halt_on_error, and a crawl
-// that is one pass (src/pass.mts). src/service-worker.mts makes the instance
+// extension lets it reach, the served mode, halt_on_error and data format,
+// and a crawl that is one pass (src/pass.mts). src/service-worker.mts makes the instance
 // and registers it.
 import { sha256 } from '@bric/rex-core/common';
 import rexCorePlugin, { dispatchEvent } from '@bric/rex-core/service-worker';
@@ -8,6 +8,7 @@ import { REXSpider, type REXSpiderCrawlResult } from '@bric/rex-spider/service-w
 
 import { ALLOWED_URL_PATTERNS } from './allowed.mts';
 import { createClient } from './client.mts';
+import { dataFormatOf } from './format.mts';
 import { HOME_URL, isSignedIn } from './home.mts';
 import { KEY_PREFIX } from './keys.mts';
 import { sleep } from './pacing.mts';
@@ -31,6 +32,10 @@ export class GoogleAISpider extends REXSpider {
   // only ever turns off.
   haltsOnError = true;
 
+  // data_format as served on the last refresh (format.mts): the extension
+  // serves its own. Absent or out of form is format 1, as before.
+  dataFormatServed = 1;
+
   // Whether a pass is running, set the moment a crawl starts. rex-spider's
   // own flag is set only once rex-core has stored the crawl's start, so a
   // second round could start a second pass before it, and two passes would
@@ -44,10 +49,18 @@ export class GoogleAISpider extends REXSpider {
     super.updateConfiguration(configuration);
     this.summarizes = configuration.summarize === true;
     this.haltsOnError = configuration.halt_on_error !== false;
+    // rex-spider's config type has no data_format, so it is read as unknown,
+    // as a property like the keys above: rex-spider hands on a served block
+    // that is not an object as it is, and the in operator would throw on it.
+    this.dataFormatServed = dataFormatOf((configuration as { data_format?: unknown }).data_format);
   }
 
   justSummarize(): boolean {
     return this.summarizes;
+  }
+
+  dataFormat(): number {
+    return this.dataFormatServed;
   }
 
   continueAfterError(): boolean {
