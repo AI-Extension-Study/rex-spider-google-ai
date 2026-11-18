@@ -346,15 +346,20 @@ test('a redirect to /sorry/ ends the pass as a challenge, read from the URL the 
 })
 
 // After about 40 requests Google answers the thread page with a limited
-// page: a 200 search page with none of the five values. Here it comes from
-// the third thread read on. The home page still says signed in, so the pass
-// stops as limited with a 60-minute back-off, and that thread gets nothing,
-// not even its summary, so a later pass reads it.
+// page: a 200 search page with none of the five values. The spider takes such
+// a page for the limit only after 5 reads in the hour before it, so three
+// reads are stored first, and the page comes from the pass's third read on,
+// the one with five before it. The home page still says signed in, so the
+// pass stops as limited with a 60-minute back-off, and that thread gets
+// nothing, not even its summary, so a later pass reads it.
 test('a limited thread page stops the pass as limited after the records before it, with nothing for that thread, and the back-off it sets skips the next pass with no request', async ({ google, serviceWorker }) => {
   const threads = [4, 3, 2, 1].map((n) => ({ n, updated: T + n * 600 }))
   google.pages = [threads]
   google.limitedFrom = 3
   await untilStoreOpen(serviceWorker)
+  const start = Date.now()
+  const earlier = [3, 2, 1].map((k) => start - k * 60_000)
+  expect(await storeValue(serviceWorker, 'rex-spider-google-ai-read-times', earlier)).toBe(true)
   await configure(serviceWorker)
 
   const before = Date.now()
@@ -374,10 +379,12 @@ test('a limited thread page stops the pass as limited after the records before i
   for (const id of [`${mtid(2)}-detail`, mtid(2)]) {
     expect(await fetchValue(serviceWorker, `rex-spider-google-ai-conversation-upload-${id}-${threads[2].updated * 1000}`)).toBeNull()
   }
-  // Each of the three page reads was counted before its request.
+  // Each of the three page reads was counted before its request, after the
+  // three stored.
   const times = await fetchValue(serviceWorker, 'rex-spider-google-ai-read-times')
-  expect(times).toHaveLength(3)
-  for (const time of times) {
+  expect(times).toHaveLength(6)
+  expect(times.slice(0, 3)).toEqual(earlier)
+  for (const time of times.slice(3)) {
     expect(time).toBeGreaterThanOrEqual(before)
     expect(time).toBeLessThanOrEqual(after)
   }
@@ -389,6 +396,25 @@ test('a limited thread page stops the pass as limited after the records before i
   expect(completions(skipped)).toEqual([[-1, [], reason]])
   expect(skipped.result).toEqual({ sitesCrawled: ['google-ai'], issues: [{ url: LOGIN, message: reason }] })
   expect(await fetchValue(serviceWorker, 'rex-spider-google-ai-read-times')).toEqual(times)
+})
+
+// The same page on an early read of the hour is taken for a change to
+// Google's markup: a layout failure, so the thread's summary goes out in the
+// detail's place, with a 1-day memo and no back-off.
+test('a thread page with none of the values on an early read is a layout failure: its summary goes out, with a memo and no back-off', async ({ google, serviceWorker }) => {
+  const thread = { n: 1, updated: T }
+  google.pages = [[thread]]
+  google.limitedFrom = 1
+  await untilStoreOpen(serviceWorker)
+  await configure(serviceWorker, { halt_on_error: false })
+
+  const round = await crawl(serviceWorker)
+  expect(google.requests.splice(0)).toEqual(['home', 'list 0', 'page 1', 'home'])
+  expect(records(round)).toEqual([summaryRecord(thread)])
+  expectInLayout(round)
+  expect(completions(round)).toEqual([[1, [mtid(1)], 'ok seen=1 dispatched=1 failed=1']])
+  expect(await fetchValue(serviceWorker, `rex-spider-google-ai-detail-memo-${mtid(1)}`)).toEqual({ ended: T * 1000, at: expect.any(Number), retryMs: 86_400_000, failures: 1 })
+  expect(await fetchValue(serviceWorker, 'rex-spider-google-ai-backoff')).toBeNull()
 })
 
 // At most 15 thread reads in any 60 minutes, counted across passes in the

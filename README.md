@@ -82,11 +82,12 @@ A turn is one question or one answer, two per turn block, in the thread's order:
 
 **Null when unreadable.** The question's counts are null when the turn has no question heading, or the heading has no label (`src/turns.mts:468-476`). The answer's counts and citations are null when its body is not found. `citation_count` is also null when the answer has no marker but links outside Google, which means it cites in a way the count cannot see (`src/turns.mts:478-498`).
 
-**`turns_complete` is false when** (`src/turns.mts:514-517`, `src/read.mts:140`, `src/record.mts:202-219`):
-- the thread held no turn block;
+**`turns_complete` is false when** (`src/turns.mts:514-517`, `src/read.mts`, `src/record.mts:202-219`):
 - a block lacked its question or answer, or the question headings did not number the blocks;
 - the stream did not end whole;
 - the turns were cut to the newest 1,000 or to 512 Ki characters of JSON.
+
+A stream with no turn block, or none whose answer body is found, gives no detail record at all: it is a layout failure (see "When something fails"), since every thread has at least one turn.
 
 ## Modes and the re-send
 
@@ -116,15 +117,19 @@ The hash uses no secret key, so someone who guesses a title exactly can confirm 
 ## When something fails
 
 - **Google asks for a wait** (`src/backoff.mts`, `src/pass.mts`). A 429, a 503, any `Retry-After` header, or a redirect to Google's unusual-traffic page (`/sorry/`) stops the pass. It can come at the home page, a list page, either of a thread's requests or a home check. The pass starts a back-off kept in the extension's storage (`rex-spider-google-ai-backoff`): 5 minutes, doubling with each refusal in a row, longer if `Retry-After` asks, at most 6 hours. A thread refused this way gets nothing and is read after the back-off.
-- **Google's limited page.** After about 40 requests Google answers the thread page with a 200 page that holds none of the five values. A thread page with none of the four `data-` attributes, in any quoting, is read as that page (`src/read.mts:79-87`).
+- **Google's limited page.** After about 40 requests Google answers the thread page with a 200 page that holds none of the five values. A thread page with none of the four `data-` attributes, in any quoting (`src/read.mts:80-88`), is read as that page only when at least 5 reads are stored in the 3 hours before it (`LIMITED_AFTER_READS`, `LIMITED_WINDOW_MS`, `src/budget.mts`). The window is longer than the read budget's hour so that a limit outlasting the 60-minute back-off still reads as limited. With fewer reads it is a layout failure, with the home check, the summary and the memo below: on the one account tested live the limit came only after 19 to 36 thread reads, while a change to Google's markup would show from the first.
   - The pass first checks the home page once more: signed out ends it as `not-signed-in`, and a refusal stops it with that refusal's back-off.
   - Otherwise it stops with `stop=limited` and a back-off of 60 minutes, doubling, at most 6 hours, kept even if a switch-off ends the pass during the home check's wait.
   - That thread gets no summary and no memo, does not count as a failed read, and is read after the back-off.
 - **How back-offs run.** Refusals in a row are counted across codes, and each wait is from its own code's base. Passes during a back-off end at once with no request. A pass that reads a list page with no refusal clears it. A stored wait more than 6 hours ahead is ignored, since only a clock that went back leaves one.
-- **Sign-out.** A home page without `SignOutOptions`, a 401 anywhere, or a list page after a cursor with no entry list (`[]`, as a session signed out mid-walk answers; an empty last page `[null, null, 1]` is not one) ends the pass as not signed in, with no back-off (`src/list.mts:245-249`). A thread page that lacks a value but still holds one of the four attributes gets the same home check before its failure counts.
-- **Any other failed read is that thread's alone.** That covers a page lacking a value or holding one out of form, a broken stream, a body over the cap, a 403, a 404, a 5xx and no answer.
+  - The back-off is read with rex-core's 1 s store deadline, and once more with 20 s when that gets no answer, since the extension's uploads share the same database. A pass goes ahead only when neither read answers.
+  - Before a refusal's back-off is written, the stored one is read again, and the new one never waits less or counts fewer refusals than it, so a back-off the pass could not read is doubled, not restarted (`src/pass.mts`, `laterBackoff` in `src/backoff.mts`).
+- **Sign-out.** A home page without `SignOutOptions`, or a 401 anywhere, ends the pass as not signed in, with no back-off.
+  - A list page after a cursor with no entry list (`[]`, as a session signed out mid-walk answers, or `[[], null, 1]`; an empty last page `[null, null, 1]` is not one) gets a home check first (`src/list.mts:246-251`, `listEnded` in `src/pass.mts`). Signed in, the list ended there and the walk is whole. Signed out, or a home page that cannot say, ends the pass as not signed in, and a refusal stops it with its back-off.
+  - A thread page that lacks a value but still holds one of the four attributes gets the same home check before its failure counts.
+- **Any other failed read is that thread's alone.** That covers a page lacking a value or holding one out of form, a stream with no turn block or no answer found in any turn, a broken stream, a body over the cap, a 403, a 404, a 5xx and no answer.
   - Its summary record goes out in the detail's place, once per last use, unless one already went out at that time. It gets no key, so the detail read comes again.
-  - A memo (`rex-spider-google-ai-detail-memo-<mtid>`) then holds the thread back. It waits 1 day after a first failure that may pass by itself (no answer, a 5xx or a redirect not followed, a page lacking a value, a broken stream), and 7 days otherwise or on a repeat. A thread used since is read at once.
+  - A memo (`rex-spider-google-ai-detail-memo-<mtid>`) then holds the thread back. It waits 1 day after a first failure that may pass by itself (no answer, a 5xx or a redirect not followed, a page lacking a value, a stream with no answer found, a broken stream), and 7 days otherwise or on a repeat. A thread used since is read at once.
   - Three failed reads in a row end the reads, or the first with `halt_on_error` (see "Settings it reads").
 
 ## Reading the completion events
@@ -141,7 +146,7 @@ Each pass sends one event, `rex-spider-google-ai-complete`, with `crawled_count`
 | `partial` | a later list page failed, or the walk was cut; the same fields as `ok`, plus `cut` |
 | `none` | signed in, and no thread since the window's start |
 | `list-failed` | the list could not be read into a thread in the window: a first page that is not a list page, or a list read only in part that gave none; `cut` says why |
-| `not-signed-in` | no `SignOutOptions`, a 401, or no entry list after a cursor; `stage` is `home` or `list` |
+| `not-signed-in` | no `SignOutOptions`, a 401, or no entry list after a cursor with a home page that then does not say signed in; `stage` is `home` or `list` |
 | `rate-limited`, `challenge` | a refusal at the home page or a list page, and a back-off started |
 | `backoff` | skipped: a back-off runs `until` the time given; `code` is `rate-limited`, `challenge` or `limited` |
 | `http-error`, `network`, `timeout` | the home page or the first list page did not answer properly |
@@ -178,7 +183,7 @@ rex-spider merges `spider.spiders.google-ai` over `spider.spiders.default` from 
 CI uses Node 24.11 (`.github/workflows/ci.yml`).
 
 - `npm ci`, then `npm run build` (`tsc`, type checks only) and `npm run lint`.
-- `npm run test:unit` runs Node's test runner on `tests/unit`, with no browser.
+- `npm run test:unit` runs Node's test runner on `tests/unit`, with no browser. It fails when its glob matches no test file (`tests/require-unit-tests.mjs`), since `node --test` alone passes then.
 - `npm run test:specs` builds a test extension and runs the Playwright specs in Chromium:
   - `tests/specs/crawl.spec.ts` runs whole passes in a real service worker, with www.google.com answered by routes and every id, title and text made up;
   - `tests/specs/spider.spec.ts` checks the module's registration, its flags and its allow patterns as Chrome rules;

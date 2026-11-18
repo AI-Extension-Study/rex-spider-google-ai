@@ -184,6 +184,17 @@ test('read times that get no answer are flagged, and a write of them that gets n
   assert.deepEqual(await store.reads.set([1700000000000]), { ok: false, unanswered: true });
 });
 
+test('a back-off read can be given a longer deadline, for an answer that comes after the store\'s own', { timeout: 2000 }, async () => {
+  const state = { until: 1700000300000, failures: 6, code: 'challenge' as const };
+  const late = ((message: Message, _sender: unknown, sendResponse: (response: unknown) => void) => {
+    setTimeout(() => sendResponse(message.messageType === 'fetchValue' ? state : true), 60);
+    return true;
+  }) as unknown as HandleMessage;
+  const store = createStore(late, { deadlineMs: 20, log: quiet });
+  assert.deepEqual(await store.backoff.get(), { value: null, unanswered: true, malformed: false });
+  assert.deepEqual(await store.backoff.get(300), { value: state, unanswered: false, malformed: false });
+});
+
 test('a back-off that gets no answer is flagged, and counts as none', { timeout: 2000 }, async () => {
   const store = createStore(rexCore({ open: false }).handleMessage, { deadlineMs: 50, log: quiet });
   assert.deepEqual(await store.backoff.get(), { value: null, unanswered: true, malformed: false });

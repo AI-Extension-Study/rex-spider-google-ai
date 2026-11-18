@@ -50,7 +50,8 @@ export type WalkOutcome = 'whole' | 'partial' | 'failed';
 // ok (a refusal, a sign-out, another status), handed back in answer.
 // unreadable: a 2xx page that is not a list page, handed back too. no-list: a
 // page after a cursor with no entry list, as a session signed out mid-walk
-// answers. timeout and network: a request with no answer. repeated-cursor and
+// answers, or perhaps the page after an account's last full page; the pass
+// asks the home page which. timeout and network: a request with no answer. repeated-cursor and
 // page-limit: the walk was cut.
 export type WalkStop = 'answer' | 'unreadable' | 'no-list' | 'timeout' | 'network' | 'repeated-cursor' | 'page-limit';
 
@@ -243,7 +244,8 @@ export async function walkList(client: Client, inWindow: (ms: number) => Promise
       return short(pages, 'unreadable', answer);
     }
     // On the first page no list is an account with no threads. After a
-    // cursor it is a session that ended mid-walk, not the end of the list.
+    // cursor it is a session that ended mid-walk, or the end of the list;
+    // the pass asks the home page which.
     if (pages > 0 && page.noList) {
       return short(pages, 'no-list', answer);
     }

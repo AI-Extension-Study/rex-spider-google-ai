@@ -17,6 +17,23 @@ export interface ReadBudget {
 // To be checked in a live run before release.
 export const READ_BUDGET: ReadBudget = { reads: 15, windowMs: 3_600_000 };
 
+// A thread page with none of the four data- attributes is taken for Google's
+// limited page only when at least this many reads are stored in the
+// LIMITED_WINDOW_MS before it; with fewer it is a layout failure, with its
+// summary and memo. On the one account tested live (2026-11-17), the limit
+// came only after 19 to 36 thread reads, never on an early read, while a
+// change to Google's markup that drops the four would show from the first.
+export const LIMITED_AFTER_READS = 5;
+
+// The window LIMITED_AFTER_READS counts over: 3 hours, not the read budget's
+// hour. The reads that met Google's limit are about an hour old when its
+// 60-minute back-off ends, so a limit that outlasts the back-off must still
+// read as limited, or the first reads after it would go out as layout
+// failures and the clean list read would clear the back-off. The store keeps
+// the newest READ_BUDGET.reads times whatever their age (withRead), so up to
+// 15 count here.
+export const LIMITED_WINDOW_MS = 3 * 3_600_000;
+
 // A stored time further ahead of now than CLOCK_SKEW_MS was written under a
 // clock that ran fast, as the mode record's start (mode.mts): kept, it would
 // count until the clock caught up. One less far ahead still counts, so a
