@@ -117,6 +117,9 @@ const detailRecord = (thread) => ({
   metadata: { ...metadataOf(thread), turn_blocks: blocksOf(thread) },
 })
 
+// A record as above under a served data_format: the same but its format_version.
+const inFormat = (record, format: number) => ({ ...record, format_version: format })
+
 const METADATA_KEYS = ['title_hash', 'created_at', 'updated_at', 'list_numbers']
 const TURN_KEYS = ['identifier', 'parent', 'speaker', 'when', 'on_current_branch', 'text_chars', 'text_words', 'citation_count', 'search_result_count', 'attachments']
 // Every text the site plants: the list's markers, the titles and mstks, and
@@ -128,11 +131,11 @@ const TEXT = [...MARKERS, 'SECRET-TITLE', 'MstkThread', 'GarcForThread', 'Made-u
 // was dispatched; the platform and format; metadata's keys exactly; turns
 // with the standard keys only and their fixed values, two to a block; and
 // no text the site planted.
-function expectInLayout(round) {
+function expectInLayout(round, format = 1) {
   const sent = records(round)
   expect(round.redacted).toEqual(sent)
   for (const record of sent) {
-    expect([record.platform, record.format_version, typeof record.is_summary]).toEqual(['google-ai-mode', 1, 'boolean'])
+    expect([record.platform, record.format_version, typeof record.is_summary]).toEqual(['google-ai-mode', format, 'boolean'])
     expect(Object.keys(record.metadata).sort()).toEqual([...METADATA_KEYS, ...(record.is_summary ? [] : ['turn_blocks'])].sort())
     for (const each of record.turns) {
       expect(Object.keys(each)).toEqual(TURN_KEYS)
@@ -265,6 +268,99 @@ for (const mode of ['summary', 'detail'] as const) {
     expect(records(next)).toEqual([])
   })
 }
+
+// The upload key rex-spider stores for a thread under an id, at its last use.
+const uploadKey = (id: string, thread) => `rex-spider-google-ai-conversation-upload-${id}-${thread.updated * 1000}`
+
+// The extension serves its data format as data_format. A block without one
+// keys and stamps as format 1; a block with 2 keys every thread afresh, so
+// each in the crawl window goes out once more, whatever its age, and the
+// format 1 keys stay as they were.
+test('a block without data_format stamps today\'s ids and format 1; one with data_format 2 then re-sends every thread in the window as format 2, stamped -f2, once', async ({ google, serviceWorker }) => {
+  test.setTimeout(60_000)
+  const now = Math.floor(Date.now() / 1000)
+  const threads = [{ n: 1, updated: now - 3600 }, { n: 2, updated: now - 100 * DAY }, { n: 3, updated: now - 400 * DAY }]
+  google.pages = [threads]
+  await untilStoreOpen(serviceWorker)
+
+  await configure(serviceWorker, { summarize: true })
+  const first = await crawl(serviceWorker)
+  expect(records(first)).toEqual(threads.map((thread) => summaryRecord(thread)))
+  expectInLayout(first)
+  for (const thread of threads) {
+    expect(await fetchValue(serviceWorker, uploadKey(mtid(thread.n), thread))).toEqual(expect.any(Number))
+    expect(await fetchValue(serviceWorker, uploadKey(`${mtid(thread.n)}-f2`, thread))).toBeNull()
+  }
+
+  await configure(serviceWorker, { summarize: true, data_format: 2 })
+  const second = await crawl(serviceWorker)
+  expect(google.requests.splice(0)).toEqual(['home', 'list 0', 'home', 'list 0'])
+  expect(records(second)).toEqual(threads.map((thread) => inFormat(summaryRecord(thread), 2)))
+  expectInLayout(second, 2)
+  expect(completions(second)).toEqual([[3, threads.map((thread) => mtid(thread.n)), 'ok seen=3 dispatched=3']])
+  for (const thread of threads) {
+    expect(await fetchValue(serviceWorker, uploadKey(`${mtid(thread.n)}-f2`, thread))).toEqual(expect.any(Number))
+    expect(await fetchValue(serviceWorker, uploadKey(mtid(thread.n), thread))).toEqual(expect.any(Number))
+  }
+
+  const third = await crawl(serviceWorker)
+  expect(records(third)).toEqual([])
+  expect(completions(third)).toEqual([[0, threads.map((thread) => mtid(thread.n)), 'ok seen=3 dispatched=0']])
+})
+
+// A browser that ran detail mode long before, each thread sent in both modes
+// under format 1 and by the old spider: under data_format 2, every thread in
+// the window is read and sent again, the ones older than 90 days included.
+test('served detail and data_format 2, threads holding every format 1 key and the old spider\'s are all read and sent as format 2, stamped -detail-f2, and the next pass sends none', async ({ google, serviceWorker }) => {
+  test.setTimeout(60_000)
+  const now = Math.floor(Date.now() / 1000)
+  const threads = [{ n: 1, updated: now - 3600 }, { n: 2, updated: now - 100 * DAY }, { n: 3, updated: now - 120 * DAY }]
+  google.pages = [threads]
+  await untilStoreOpen(serviceWorker)
+  expect(await storeValue(serviceWorker, 'rex-spider-google-ai-mode', { mode: 'detail', since: Date.now() - 400 * DAY * 1000 })).toBe(true)
+  for (const thread of threads) {
+    for (const id of [mtid(thread.n), `${mtid(thread.n)}-detail`, `${mstk(thread.n)}_${mtid(thread.n)}`]) {
+      expect(await storeValue(serviceWorker, uploadKey(id, thread), Date.now())).toBe(true)
+    }
+  }
+  await configure(serviceWorker, { data_format: 2 })
+
+  const round = await crawl(serviceWorker)
+  expect(google.requests.splice(0)).toEqual(['home', 'list 0', 'page 1', 'folwr 1', 'page 2', 'folwr 2', 'page 3', 'folwr 3'])
+  expect(records(round)).toEqual(threads.map((thread) => inFormat(detailRecord(thread), 2)))
+  expectInLayout(round, 2)
+  expect(completions(round)).toEqual([[3, threads.map((thread) => mtid(thread.n)), 'ok seen=3 dispatched=3']])
+  for (const thread of threads) {
+    expect(await fetchValue(serviceWorker, uploadKey(`${mtid(thread.n)}-detail-f2`, thread))).toEqual(expect.any(Number))
+  }
+
+  const next = await crawl(serviceWorker)
+  expect(google.requests.splice(0)).toEqual(['home', 'list 0'])
+  expect(records(next)).toEqual([])
+})
+
+// A failed read's memo is the format's own: under data_format 2 a memo
+// written under format 1 holds nothing back, and a new one goes under the
+// -f2 key. The second read gets a page with none of the values, a layout
+// failure this early in the hour.
+test('served data_format 2, a format 1 memo holds no thread back, and a layout failure writes its memo under the -f2 key with its summary as format 2', async ({ google, serviceWorker }) => {
+  const [older, newer] = [{ n: 1, updated: T }, { n: 2, updated: T + 600 }]
+  google.pages = [[newer, older]]
+  google.limitedFrom = 2
+  await untilStoreOpen(serviceWorker)
+  const memoOne = { ended: newer.updated * 1000, at: Date.now() - 1000, retryMs: 7 * 86_400_000, failures: 2 }
+  expect(await storeValue(serviceWorker, `rex-spider-google-ai-detail-memo-${mtid(2)}`, memoOne)).toBe(true)
+  await configure(serviceWorker, { data_format: 2, halt_on_error: false })
+
+  const round = await crawl(serviceWorker)
+  expect(google.requests.splice(0)).toEqual(['home', 'list 0', 'page 2', 'folwr 2', 'page 1', 'home'])
+  expect(records(round)).toEqual([inFormat(detailRecord(newer), 2), inFormat(summaryRecord(older), 2)])
+  expectInLayout(round, 2)
+  expect(completions(round)).toEqual([[2, [mtid(2), mtid(1)], 'ok seen=2 dispatched=2 failed=1']])
+  expect(await fetchValue(serviceWorker, `rex-spider-google-ai-detail-memo-${mtid(2)}`)).toEqual(memoOne)
+  expect(await fetchValue(serviceWorker, `rex-spider-google-ai-detail-memo-${mtid(1)}-f2`)).toEqual({ ended: T * 1000, at: expect.any(Number), retryMs: 86_400_000, failures: 1 })
+  expect(await fetchValue(serviceWorker, `rex-spider-google-ai-detail-memo-${mtid(1)}`)).toBeNull()
+})
 
 test('signed out, the pass ends at the home page with count -1, its reason in the issues, no list request and no back-off', async ({ google, serviceWorker }) => {
   google.signedIn = false

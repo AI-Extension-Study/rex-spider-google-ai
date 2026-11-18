@@ -22,18 +22,48 @@ const UPDATED_S = 1_763_303_600; // an hour later
 const transmitted = (id: string, updated: DateString) => `rex-spider-google-ai-conversation-upload-${id}-${Math.round(updated.timestamp())}`;
 
 test('the three key ids: the bare mtid in summary mode, mtid-detail in detail mode, mstk_mtid as the old spider wrote it', () => {
-  assert.equal(uploadKeyId(MTID, true), MTID);
-  assert.equal(uploadKeyId(MTID, false), `${MTID}-detail`);
+  assert.equal(uploadKeyId(MTID, true, 1), MTID);
+  assert.equal(uploadKeyId(MTID, false, 1), `${MTID}-detail`);
   assert.equal(legacyKeyId({ mstk: MSTK, mtid: MTID }), `${MSTK}_${MTID}`);
-  assert.equal(uploadKeyId('t1', true), 't1');
-  assert.equal(uploadKeyId('t1', false), 't1-detail');
+  assert.equal(uploadKeyId('t1', true, 1), 't1');
+  assert.equal(uploadKeyId('t1', false, 1), 't1-detail');
   assert.equal(legacyKeyId({ mstk: 'k1', mtid: 't1' }), 'k1_t1');
+});
+
+// Format 1 keeps the ids above; a later format adds -f<n> to both, so every
+// thread is unsent under it in both modes.
+test('the key ids of a data format: format 1 keeps today\'s ids, a later one adds -f<n> in both modes', () => {
+  assert.equal(uploadKeyId('c', true, 1), 'c');
+  assert.equal(uploadKeyId('c', false, 1), 'c-detail');
+  assert.equal(uploadKeyId('c', true, 2), 'c-f2');
+  assert.equal(uploadKeyId('c', false, 2), 'c-detail-f2');
+  assert.equal(uploadKeyId(MTID, true, 3), `${MTID}-f3`);
+  assert.equal(uploadKeyId(MTID, false, 999), `${MTID}-detail-f999`);
+});
+
+test('the upload key rex-spider builds under format 2 differs from both of format 1\'s and from the old form', () => {
+  const updated = new DateString(UPDATED_S);
+  const two = [transmitted(uploadKeyId(MTID, true, 2), updated), transmitted(uploadKeyId(MTID, false, 2), updated)];
+  assert.deepEqual(two, [`rex-spider-google-ai-conversation-upload-${MTID}-f2-1763303600000`, `rex-spider-google-ai-conversation-upload-${MTID}-detail-f2-1763303600000`]);
+  const one = [uploadKeyId(MTID, true, 1), uploadKeyId(MTID, false, 1), legacyKeyId({ mstk: MSTK, mtid: MTID })].map((id) => transmitted(id, updated));
+  assert.equal(new Set([...one, ...two]).size, 5);
+});
+
+// A format that is not a whole number from 1 to 999 is a wiring mistake: it
+// throws rather than give format 1's key, which would read a thread sent
+// under format 1 as sent under the format the pass runs.
+test('a data format that is not a whole number from 1 to 999 is refused', () => {
+  for (const format of [0, -1, 1.5, 1000, NaN, Infinity, undefined, null, '2', '1']) {
+    for (const summary of [true, false]) {
+      assert.throws(() => uploadKeyId(MTID, summary, format as unknown as number), TypeError, `${String(format)}, summary ${summary}`);
+    }
+  }
 });
 
 test('the upload key rex-spider builds differs between the two modes and the old form for one thread at one time', () => {
   const updated = new DateString(UPDATED_S);
-  assert.equal(transmitted(uploadKeyId(MTID, true), updated), `rex-spider-google-ai-conversation-upload-${MTID}-1763303600000`);
-  assert.equal(transmitted(uploadKeyId(MTID, false), updated), `rex-spider-google-ai-conversation-upload-${MTID}-detail-1763303600000`);
+  assert.equal(transmitted(uploadKeyId(MTID, true, 1), updated), `rex-spider-google-ai-conversation-upload-${MTID}-1763303600000`);
+  assert.equal(transmitted(uploadKeyId(MTID, false, 1), updated), `rex-spider-google-ai-conversation-upload-${MTID}-detail-1763303600000`);
   assert.equal(transmitted(legacyKeyId({ mstk: MSTK, mtid: MTID }), updated), `rex-spider-google-ai-conversation-upload-${MSTK}_${MTID}-1763303600000`);
 });
 
@@ -81,19 +111,31 @@ test('the mode record, the back-off, the read times and the memos sit under the 
   assert.equal(MODE_KEY, 'rex-spider-google-ai-mode');
   assert.equal(BACKOFF_KEY, 'rex-spider-google-ai-backoff');
   assert.equal(READS_KEY, 'rex-spider-google-ai-read-times');
-  assert.equal(memoKey(MTID), `rex-spider-google-ai-detail-memo-${MTID}`);
+  assert.equal(memoKey(MTID, 1), `rex-spider-google-ai-detail-memo-${MTID}`);
+});
+
+// A failed read's memo is the data format's own, as the upload keys are, so
+// a memo written under format 1 does not hold a thread back under format 2.
+test('the memo key of a data format: format 1 keeps today\'s key, a later one adds -f<n>', () => {
+  assert.equal(memoKey(MTID, 1), `rex-spider-google-ai-detail-memo-${MTID}`);
+  assert.equal(memoKey(MTID, 2), `rex-spider-google-ai-detail-memo-${MTID}-f2`);
+  assert.equal(memoKey(MTID, 999), `rex-spider-google-ai-detail-memo-${MTID}-f999`);
+  for (const format of [0, -1, 1.5, 1000, NaN, undefined, null, '2']) {
+    assert.throws(() => memoKey(MTID, format as unknown as number), TypeError, String(format));
+  }
+  assert.equal(keyKind(memoKey(MTID, 2)), 'rex-spider-google-ai-detail-memo');
 });
 
 test('every key id needs its ids', () => {
-  assert.throws(() => memoKey(''), TypeError);
-  assert.throws(() => uploadKeyId('', true), TypeError);
+  assert.throws(() => memoKey('', 1), TypeError);
+  assert.throws(() => uploadKeyId('', true, 1), TypeError);
   assert.throws(() => legacyKeyId({ mstk: '', mtid: MTID }), TypeError);
   assert.throws(() => legacyKeyId({ mstk: MSTK, mtid: '' }), TypeError);
 });
 
 test('an id that is not a string is refused at run time too', () => {
-  assert.throws(() => memoKey(123 as unknown as string), TypeError);
-  assert.throws(() => uploadKeyId(null as unknown as string, false), TypeError);
+  assert.throws(() => memoKey(123 as unknown as string, 1), TypeError);
+  assert.throws(() => uploadKeyId(null as unknown as string, false, 1), TypeError);
   assert.throws(() => legacyKeyId({ mstk: undefined as unknown as string, mtid: MTID }), TypeError);
   assert.throws(() => legacyKeyId({ mstk: MSTK, mtid: 7 as unknown as string }), TypeError);
 });
@@ -102,7 +144,8 @@ test('what may be logged of a key is its kind, never a thread id', () => {
   assert.equal(keyKind(MODE_KEY), 'rex-spider-google-ai-mode');
   assert.equal(keyKind(BACKOFF_KEY), 'rex-spider-google-ai-backoff');
   assert.equal(keyKind(READS_KEY), 'rex-spider-google-ai-read-times');
-  assert.equal(keyKind(memoKey(MTID)), 'rex-spider-google-ai-detail-memo');
+  assert.equal(keyKind(memoKey(MTID, 1)), 'rex-spider-google-ai-detail-memo');
   assert.equal(keyKind(`rex-spider-google-ai-conversation-upload-${MTID}-1763303600000`), 'other key');
   assert.equal(keyKind(`rex-spider-google-ai-conversation-upload-${MSTK}_${MTID}-1763303600000`), 'other key');
+  assert.equal(keyKind(`rex-spider-google-ai-conversation-upload-${MTID}-detail-f2-1763303600000`), 'other key');
 });

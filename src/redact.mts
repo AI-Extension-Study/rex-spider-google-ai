@@ -1,25 +1,26 @@
 // The Google AI Mode case of the extension's content processor, which calls
 // it for platform 'google-ai-mode' on every rex-conversation point before it
-// is queued for upload. A record buildSummaryRecord or buildDetailRecord
-// made, in the standard record layout (format 1), comes back equal, each
-// value written from its checked form (keep.mts) and every other key dropped,
-// at every level, but in two cases. A list time outside 2001 to 2286 cuts the
-// record to the scaffold (asSeconds), and a speaker other than user or
-// assistant reads unrecognised. An identifier outside the mtid's form reads
-// null, and a turn of another form is dropped, which marks the turns
-// incomplete. Any other point keeps only the scaffold: the fields the
-// processor keeps for a point of no known platform, each in its form. Every
-// point the old crawler sent is one, since none has a format_version. The
-// case never throws, because rex-content-processing uploads a failed
-// processor's input unredacted. The extension carries a copy of this file and
-// keep.mts, so the two import nothing but rex-types. Pure.
+// is queued for upload, with the data format it accepts: its own, which it
+// also serves the spider as data_format. A record buildSummaryRecord or
+// buildDetailRecord made under that format, in the standard record layout,
+// comes back equal, each value written from its checked form (keep.mts) and
+// every other key dropped, at every level, but in two cases. A list time
+// outside 2001 to 2286 cuts the record to the scaffold (asSeconds), and a
+// speaker other than user or assistant reads unrecognised. An identifier
+// outside the mtid's form reads null, and a turn of another form is dropped,
+// which marks the turns incomplete. Any other point keeps only the scaffold:
+// the fields the processor keeps for a point of no known platform, each in
+// its form. A record of another format is one, and so is every point the old
+// crawler sent, since none has a format_version. The case never throws,
+// because rex-content-processing uploads a failed processor's input
+// unredacted. The extension carries a copy of this file and keep.mts, so the
+// two import nothing but rex-types and hold no format of their own. Pure.
 import { DateString } from '@bric/rex-types/types';
 
 import { DETAIL_METADATA, INSTANT_TO_STRING, SUMMARY_METADATA, TURN, asMtid, asSeconds, hasOwn, isObject, keepAll } from './keep.mts';
 
 const NAME = 'rex-conversation';
 const PLATFORM = 'google-ai-mode';
-const FORMAT_VERSION = 1;
 
 // The form the scaffold keeps a name, a platform or a generator id in: PDK's
 // generator ids and the platform strings are lowercase words joined by
@@ -87,8 +88,13 @@ function keepTurn(turn: unknown): Record<string, unknown> | null {
   return kept.speaker === null || kept.on_current_branch === null ? null : kept;
 }
 
-/** The record for a record the builders made, else the scaffold; never throws. */
-export function redactGoogleAiMode(event: Record<string, unknown>): Record<string, unknown> {
+/**
+ * The record for a record the builders made under the accepted format, else
+ * the scaffold; never throws. An accepted format that is not a whole number
+ * from 1 to 999 accepts no record, so a call that leaves it out cannot pass a
+ * point with no format_version.
+ */
+export function redactGoogleAiMode(event: Record<string, unknown>, format: number): Record<string, unknown> {
   const fields = Object.fromEntries(FIELDS.map((key) => [key, readOwn(event, key)]));
   const scaffold = Object.fromEntries(Object.entries(SCAFFOLD).filter(([key, holds]) => holds(fields[key])).map(([key]) => [key, fields[key]]));
   try {
@@ -98,7 +104,8 @@ export function redactGoogleAiMode(event: Record<string, unknown>): Record<strin
     const shaped = isSummary === true
       ? Array.isArray(turns) && turns.length === 0 && complete === undefined
       : isSummary === false && Array.isArray(turns) && typeof complete === 'boolean';
-    if (name !== NAME || platform !== PLATFORM || version !== FORMAT_VERSION || !shaped || !isObject(metadata)) {
+    const accepted = Number.isInteger(format) && format >= 1 && format <= 999;
+    if (!accepted || name !== NAME || platform !== PLATFORM || version !== format || !shaped || !isObject(metadata)) {
       return scaffold;
     }
     const started = secondsOf(fields.started);
@@ -113,7 +120,7 @@ export function redactGoogleAiMode(event: Record<string, unknown>): Record<strin
     }
     const envelope = Object.fromEntries(Object.entries(scaffold).filter(([key]) => ENVELOPE.has(key)));
     const head = {
-      name: NAME, platform: PLATFORM, identifier: asMtid(identifier), format_version: FORMAT_VERSION, is_summary: isSummary, date,
+      name: NAME, platform: PLATFORM, identifier: asMtid(identifier), format_version: format, is_summary: isSummary, date,
       started: new DateString(started), ended: new DateString(ended),
     };
     if (isSummary) {

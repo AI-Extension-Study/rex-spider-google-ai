@@ -44,12 +44,15 @@ import type { AimStore, DetailMemo, Mode, Read } from './store.mts';
 // The rex-spider calls the pass makes on the spider. The flags are the
 // served config as of the last refresh, read where they apply: isEnabled
 // before every request, the served mode and halt_on_error before each
-// thread. The crawl window and the upload keys go to rex-core, which never
-// answers while its database is not open, so each such call has a deadline.
+// thread, the data format once at the pass's start. The crawl window and the
+// upload keys go to rex-core, which never answers while its database is not
+// open, so each such call has a deadline.
 export interface PassFramework {
   isEnabled(): boolean;
   justSummarize(): boolean;
   continueAfterError(): boolean;
+  // A whole number from 1 to 999 (format.mts).
+  dataFormat(): number;
   fetchCrawlDelay(): number;
   crawlWindowStart(): Promise<number | null>;
   crawlWindowEnd(): Promise<number | null>;
@@ -319,7 +322,7 @@ interface Sending {
 // Summary mode: the records in batches, each batch's keys stamped after the
 // settle wait that follows it. Each record's title hash is awaited before it
 // is dispatched.
-async function sendSummaries(pass: Pass, due: readonly ListEntry[]): Promise<Sending> {
+async function sendSummaries(pass: Pass, due: readonly ListEntry[], format: number): Promise<Sending> {
   let sent = 0;
   let stamped = 0;
   let stop: Stop | null = null;
@@ -334,7 +337,7 @@ async function sendSummaries(pass: Pass, due: readonly ListEntry[]): Promise<Sen
         // A hash that hangs holds a record for the hash deadline, and a batch
         // of them would outlast the worker's idle limit with no call between.
         touch(pass.deps.keepAlive, pass.say);
-        if (!dispatched(pass, pass.records.summary(entry, await titleHash(pass, entry)))) {
+        if (!dispatched(pass, pass.records.summary(entry, await titleHash(pass, entry), format))) {
           stop = 'internal';
           break;
         }
@@ -344,7 +347,7 @@ async function sendSummaries(pass: Pass, due: readonly ListEntry[]): Promise<Sen
       if (out.length > 0) {
         await pace(pass, pass.limits.settleMs);
         for (const entry of out) {
-          if (!(await stamp(pass, uploadKeyId(entry.mtid, true), entry.updated))) {
+          if (!(await stamp(pass, uploadKeyId(entry.mtid, true, format), entry.updated))) {
             stop = 'store';
             break;
           }
@@ -369,7 +372,7 @@ type DetailRead =
 // between its two requests, and a switch-off served in that wait rejects
 // (SwitchedOff). The log names the kind of failure and the status, never the
 // answer's text or URL.
-async function readDetail(pass: Pass, entry: ListEntry): Promise<DetailRead> {
+async function readDetail(pass: Pass, entry: ListEntry, format: number): Promise<DetailRead> {
   let result: ReadResult;
   try {
     result = await readThread(pass.deps.client, entry, () => beforeRequest(pass));
@@ -391,7 +394,7 @@ async function readDetail(pass: Pass, entry: ListEntry): Promise<DetailRead> {
   }
   touch(pass.deps.keepAlive, pass.say);
   try {
-    return { kind: 'record', record: pass.records.detail(entry, await titleHash(pass, entry), result.thread) };
+    return { kind: 'record', record: pass.records.detail(entry, await titleHash(pass, entry), result.thread, {}, format) };
   } catch (error) {
     pass.say(`the record builder failed on a thread (${nameOf(error)})`);
     return { kind: 'failed', why: 'unreadable', retryAfterMs: null };
@@ -472,7 +475,7 @@ async function spendRead(pass: Pass): Promise<{ readonly before: number } | 'spe
 // failed read, whose summary may have just gone out.
 type Pending =
   | { readonly kind: 'stamp'; readonly id: string; readonly at: DateString }
-  | { readonly kind: 'memo'; readonly mtid: string; readonly memo: DetailMemo };
+  | { readonly kind: 'memo'; readonly mtid: string; readonly format: number; readonly memo: DetailMemo };
 
 // A memo that is not kept stops the sending, as a stamp does: the next pass
 // would read the thread again at once and send its summary again.
@@ -483,7 +486,7 @@ async function written(pass: Pass, write: Pending): Promise<boolean> {
   touch(pass.deps.keepAlive, pass.say);
   let kept: boolean;
   try {
-    kept = (await pass.deps.store.memo.set(write.mtid, write.memo)).ok;
+    kept = (await pass.deps.store.memo.set(write.mtid, write.memo, write.format)).ok;
   } catch {
     kept = false;
   }
@@ -499,7 +502,7 @@ async function written(pass: Pass, write: Pending): Promise<boolean> {
 // next read, or after a settle wait at the end, so what went out is stored
 // before what says it went out. A thread its memo holds back is passed over,
 // and neither counts in a run of failed reads nor breaks one.
-async function sendDetails(pass: Pass, due: readonly ListEntry[]): Promise<Sending> {
+async function sendDetails(pass: Pass, due: readonly ListEntry[], format: number): Promise<Sending> {
   const { framework, store } = pass.deps;
   let sent = 0;
   // Threads dealt with for now: a record whose key was kept, or a failed read
@@ -515,7 +518,9 @@ async function sendDetails(pass: Pass, due: readonly ListEntry[]): Promise<Sendi
     for (const entry of due) {
       const at = entry.updated;
       touch(pass.deps.keepAlive, pass.say);
-      const memo = await store.memo.get(entry.mtid);
+      // The memo of this format: one written under another holds nothing back
+      // and counts no failure (keys.mts, memoKey).
+      const memo = await store.memo.get(entry.mtid, format);
       if (memo.unanswered) {
         pass.say('a memo of a failed read got no answer; its thread is read in a later pass');
         held += 1;
@@ -555,7 +560,7 @@ async function sendDetails(pass: Pass, due: readonly ListEntry[]): Promise<Sendi
         stop = spend === 'spent' ? 'read-budget' : 'store';
         break;
       }
-      let read = await readDetail(pass, entry);
+      let read = await readDetail(pass, entry, format);
       // Google's limit came only after many reads, so a page with none of the
       // thread value attributes this early is taken for a change to Google's
       // markup: a layout failure, with the summary in its place (budget.mts).
@@ -567,7 +572,7 @@ async function sendDetails(pass: Pass, due: readonly ListEntry[]): Promise<Sendi
         inARow = 0;
         if (memo.value !== null || memo.malformed) {
           touch(pass.deps.keepAlive, pass.say);
-          if (!(await store.memo.clear(entry.mtid)).ok) {
+          if (!(await store.memo.clear(entry.mtid, format)).ok) {
             pass.say('a memo of a failed read was not cleared');
           }
         }
@@ -577,7 +582,7 @@ async function sendDetails(pass: Pass, due: readonly ListEntry[]): Promise<Sendi
         }
         sent += 1;
         // The key's time is the list's update time, as the key was checked.
-        pending = { kind: 'stamp', id: uploadKeyId(entry.mtid, false), at };
+        pending = { kind: 'stamp', id: uploadKeyId(entry.mtid, false, format), at };
         continue;
       }
       if (read.why === 'rate-limited' || read.why === 'challenge') {
@@ -626,13 +631,13 @@ async function sendDetails(pass: Pass, due: readonly ListEntry[]): Promise<Sendi
       inARow += 1;
       const failures = (earlier?.failures ?? 0) + 1;
       // The summary goes out in the detail's place once per list time: at a
-      // first failure, and unless summary mode sent it at that time before a
-      // switch. It gets no key: a thread last used before the re-send window
-      // would then count as sent in detail (mode.mts), and its read would
-      // never come again.
-      if (failures === 1 && !(await lookup(pass)(uploadKeyId(entry.mtid, true), at))) {
+      // first failure, and unless summary mode sent it at that time, under
+      // this format, before a switch. It gets no key: a thread last used
+      // before the re-send window would then count as sent in detail
+      // (mode.mts), and its read would never come again.
+      if (failures === 1 && !(await lookup(pass)(uploadKeyId(entry.mtid, true, format), at))) {
         touch(pass.deps.keepAlive, pass.say);
-        if (!dispatched(pass, pass.records.summary(entry, await titleHash(pass, entry)))) {
+        if (!dispatched(pass, pass.records.summary(entry, await titleHash(pass, entry), format))) {
           // No memo, so a later pass reads the thread at once and sends its
           // summary then.
           stop = 'internal';
@@ -640,7 +645,7 @@ async function sendDetails(pass: Pass, due: readonly ListEntry[]): Promise<Sendi
         }
         sent += 1;
       }
-      pending = { kind: 'memo', mtid: entry.mtid, memo: { ended: at.timestamp(), at: pass.now(), retryMs: MAY_PASS.has(read.why) && failures === 1 ? RETRY_SOON_MS : RETRY_LATE_MS, failures } };
+      pending = { kind: 'memo', mtid: entry.mtid, format, memo: { ended: at.timestamp(), at: pass.now(), retryMs: MAY_PASS.has(read.why) && failures === 1 ? RETRY_SOON_MS : RETRY_LATE_MS, failures } };
       if (halts || inARow >= pass.limits.failedRun) {
         pass.say(halts ? 'a thread read failed and halt_on_error is set; the reads stop' : `${inARow} thread reads failed in a row; the reads stop`);
         stop = halts ? 'halt-on-error' : 'failed-reads';
@@ -674,15 +679,16 @@ async function sendDetails(pass: Pass, due: readonly ListEntry[]): Promise<Sendi
   return { sent, failed, held, stop, ...(stop === null ? {} : { left: due.length - done - held }) };
 }
 
-// The threads due this pass, checked against the upload keys, then sent in
-// the served mode, newest first so a pass cut short has sent the most recent.
-async function sendAll(pass: Pass, entries: readonly ListEntry[], served: Mode, since: number | null): Promise<Sending> {
+// The threads due this pass, checked against the upload keys of the pass's
+// data format, then sent in the served mode under it, newest first so a pass
+// cut short has sent the most recent.
+async function sendAll(pass: Pass, entries: readonly ListEntry[], served: Mode, since: number | null, format: number): Promise<Sending> {
   let held = 0;
   const due: ListEntry[] = [];
   try {
     const transmitted = lookup(pass);
     for (const entry of entries) {
-      const need = await dueState(transmitted, entry, served, since);
+      const need = await dueState(transmitted, entry, served, since, format);
       if (need === 'due') {
         due.push(entry);
       } else if (need === 'held') {
@@ -697,7 +703,7 @@ async function sendAll(pass: Pass, entries: readonly ListEntry[], served: Mode, 
     pass.say(`${held} threads are held back for a later pass: sent only in the other mode while the mode record could not be read`);
   }
   due.sort((a, b) => b.updated.timestamp() - a.updated.timestamp());
-  const sending = served === 'summary' ? await sendSummaries(pass, due) : await sendDetails(pass, due);
+  const sending = served === 'summary' ? await sendSummaries(pass, due, format) : await sendDetails(pass, due, format);
   return { ...sending, held: sending.held + held };
 }
 
@@ -870,6 +876,9 @@ async function run(pass: Pass): Promise<PassOutcome> {
     return { count: -1, ids: [], reason: formatReason('backoff', { until: decision.until, code: decision.code }) };
   }
   const served: Mode = framework.justSummarize() ? 'summary' : 'detail';
+  // The data format, read once: every key, record and lookup of the pass is
+  // this format's, so a refresh during the pass changes the next one.
+  const format = framework.dataFormat();
   // When this browser started running the served mode, written now if it
   // had not run it before (mode.mts). Taken before any request, so a pass
   // that finds the user signed out still dates a switch.
@@ -951,7 +960,7 @@ async function run(pass: Pass): Promise<PassOutcome> {
   if (!whole && inWindow.length === 0) {
     return none(pass, 'list-failed', { cut: cutOf(walk) });
   }
-  const sending = await sendAll(pass, inWindow, served, since);
+  const sending = await sendAll(pass, inWindow, served, since, format);
   const ids = inWindow.map((entry) => entry.mtid);
   const positive = (count: number) => (count > 0 ? count : undefined);
   const fields = {

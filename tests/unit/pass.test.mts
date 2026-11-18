@@ -44,9 +44,14 @@ function thread(n: number, days: number, changes: Record<number, unknown> = {}):
   return rawEntry({ 0: [mstk(n), mtid(n)], 5: [updated - 3600, 0], 6: [updated, 0], 22: [['mtid', mtid(n)], ['csuir', '1'], ['mstk', mstk(n)], ['udm', '50']], ...changes });
 }
 
-// The key rex-spider builds for thread n in a mode, as 'id ms'.
-const keyOf = (n: number, days: number, mode: 'summary' | 'detail'): string => `${mtid(n)}${mode === 'detail' ? '-detail' : ''} ${keyMs(days)}`;
+// The key rex-spider builds for thread n in a mode, as 'id ms': format 1's
+// ids unless a format is given, a later format's with -f<n>.
+const keyOf = (n: number, days: number, mode: 'summary' | 'detail', format = 1): string => `${mtid(n)}${mode === 'detail' ? '-detail' : ''}${format === 1 ? '' : `-f${format}`} ${keyMs(days)}`;
 const legacyKeyOf = (n: number, days: number): string => `${mstk(n)}_${mtid(n)} ${keyMs(days)}`;
+// The id a memo is held under in the fake store: the mtid under format 1, as
+// the memos option gives them, and <mtid>-f<n> under a later format, as the
+// store keys them (keys.mts, memoKey).
+const memoId = (id: string, format: number): string => (format === 1 ? id : `${id}-f${format}`);
 
 const ok = (text: string, url = ''): Answer => ({ status: 200, url, headers: {}, text });
 const failing = (status: number, headers: Record<string, string> = {}): Answer => ({ status, url: '', headers, text: '<html>SITE-TEXT refused</html>' });
@@ -121,6 +126,8 @@ interface SideOptions {
   readonly halt?: boolean | (() => boolean);
   readonly enabled?: boolean | (() => boolean);
   readonly crawlDelay?: unknown;
+  // The served data format; 1 unless a test says.
+  readonly format?: number | (() => number);
   readonly windowStart?: number | null;
   readonly windowEnd?: number | null;
   // checkIfAlreadyTransmitted never answers, as while rex-core's database is
@@ -144,6 +151,7 @@ function rexSpider(options: SideOptions = {}) {
     justSummarize: () => the(options.summarize, false),
     continueAfterError: () => !the(options.halt, true),
     fetchCrawlDelay: () => (options.crawlDelay === undefined ? 30_000 : options.crawlDelay) as number,
+    dataFormat: () => the(options.format, 1),
     crawlWindowStart: () => {
       options.onWindow?.();
       return options.silentWindow === true ? new Promise(() => {}) : Promise.resolve(options.windowStart ?? null);
@@ -217,18 +225,21 @@ function rexCore(options: CoreOptions = {}) {
         },
       },
       memo: {
-        get: async (id: string): Promise<Read<DetailMemo>> => {
+        get: async (mtidAsked: string, format: number): Promise<Read<DetailMemo>> => {
+          const id = memoId(mtidAsked, format);
           if (options.memoUnanswered?.includes(id) === true) return { value: null, unanswered: true, malformed: false };
           if (malformed.has(id)) return { value: null, unanswered: false, malformed: true };
           return { value: memos.get(id) ?? null, unanswered: false, malformed: false };
         },
-        set: async (id: string, memo: DetailMemo): Promise<Write> => {
+        set: async (mtidAsked: string, memo: DetailMemo, format: number): Promise<Write> => {
+          const id = memoId(mtidAsked, format);
           memoWrites.push([id, memo]);
           if (options.memoUnkept === true) return { ok: false, unanswered: false };
           memos.set(id, memo);
           return { ok: true, unanswered: false };
         },
-        clear: async (id: string): Promise<Write> => {
+        clear: async (mtidAsked: string, format: number): Promise<Write> => {
+          const id = memoId(mtidAsked, format);
           memoClears.push(id);
           memos.delete(id);
           malformed.delete(id);
@@ -269,8 +280,12 @@ function rexCore(options: CoreOptions = {}) {
 }
 
 // Thread n's short name in the events: n for its mtid, n-detail for its
-// detail key's id.
-const short = (id: string): string => (id.endsWith('-detail') ? `${threadOf(id.slice(0, -'-detail'.length))}-detail` : `${threadOf(id)}`);
+// detail key's id, and a later format's -f<n> after either.
+function short(id: string): string {
+  const format = /-f\d+$/.exec(id)?.[0] ?? '';
+  const key = id.slice(0, id.length - format.length);
+  return key.endsWith('-detail') ? `${threadOf(key.slice(0, -'-detail'.length))}-detail${format}` : `${threadOf(key)}${format}`;
+}
 
 // Text the site holds that must never reach a record or a log line: the
 // list's planted markers, the thread's questions, answers and other text, the
@@ -353,18 +368,18 @@ async function pass(web: ReturnType<typeof site>, side: ReturnType<typeof rexSpi
         },
       },
       memo: {
-        get: (id) => {
-          trace.push(`memo get ${short(id)}`);
+        get: (id, format) => {
+          trace.push(`memo get ${short(memoId(id, format))}`);
           clock += options.memoMs ?? 0;
-          return core.store.memo.get(id);
+          return core.store.memo.get(id, format);
         },
-        set: (id, memo) => {
-          note(`memo ${short(id)}`);
-          return core.store.memo.set(id, memo);
+        set: (id, memo, format) => {
+          note(`memo ${short(memoId(id, format))}`);
+          return core.store.memo.set(id, memo, format);
         },
-        clear: (id) => {
-          note(`clear ${short(id)}`);
-          return core.store.memo.clear(id);
+        clear: (id, format) => {
+          note(`clear ${short(memoId(id, format))}`);
+          return core.store.memo.clear(id, format);
         },
       },
       backoff: {
@@ -813,6 +828,167 @@ test('a mode record that cannot be written holds them back too', async () => {
   assert.equal(withoutMs(run.outcome.reason), 'ok seen=2 dispatched=1 held=1');
 });
 
+// ---- the data format ----
+
+const formatsOf = (sent: readonly Json[]) => sent.map((record) => [short(String(record.identifier)), record.is_summary, record.format_version]);
+
+test('after a format 1 pass sent every thread, a format 2 pass sends every thread in the window once more, stamped -f2, and the next sends none', async () => {
+  for (const summarize of [true, false]) {
+    const mode = summarize ? 'summary' : 'detail';
+    let format = 1;
+    const side = rexSpider({ summarize, format: () => format });
+    const core = rexCore();
+    const pages = [[thread(1, 1), thread(2, 100), thread(3, 400)]];
+    const days: Record<number, number> = { 1: 1, 2: 100, 3: 400 };
+    const first = await pass(site({ pages }), side, { core });
+    assert.deepEqual(formatsOf(first.sent), [['1', summarize, 1], ['2', summarize, 1], ['3', summarize, 1]], mode);
+    assert.deepEqual(side.stamps.splice(0), [1, 2, 3].map((n) => keyOf(n, days[n], mode)), mode);
+
+    format = 2;
+    const second = await pass(site({ pages }), side, { core });
+    assert.deepEqual(formatsOf(second.sent), [['1', summarize, 2], ['2', summarize, 2], ['3', summarize, 2]], mode);
+    assert.deepEqual(side.stamps.splice(0), [1, 2, 3].map((n) => keyOf(n, days[n], mode, 2)), mode);
+    assert.equal(withoutMs(second.outcome.reason), 'ok seen=3 dispatched=3', mode);
+    // The served mode did not change, so the mode record stands.
+    assert.deepEqual(core.writes, [{ mode, since: NOW }], mode);
+
+    const third = await pass(site({ pages }), side, { core });
+    assert.deepEqual(third.sent, [], mode);
+    assert.deepEqual(readsOf(third.events), [], mode);
+    assert.equal(withoutMs(third.outcome.reason), 'ok seen=3 dispatched=0', mode);
+  }
+});
+
+// The pilot browsers' case: the served mode ran long before, and each thread
+// holds both modes' format 1 keys and the old spider's.
+test('under format 2, threads holding every format 1 key and the legacy key all go out, however old, and no legacy key is looked up', async () => {
+  for (const summarize of [true, false]) {
+    const mode = summarize ? 'summary' : 'detail';
+    const ages: Record<number, number> = { 1: 2, 2: 95, 3: 300 };
+    const keys = [1, 2, 3].flatMap((n) => [keyOf(n, ages[n], 'summary'), keyOf(n, ages[n], 'detail'), legacyKeyOf(n, ages[n])]);
+    const side = rexSpider({ summarize, format: 2, keys });
+    const core = rexCore({ mode: { mode, since: NOW - 400 * DAY } });
+    const run = await pass(site({ pages: [[thread(1, 2), thread(2, 95), thread(3, 300)]] }), side, { core });
+    assert.deepEqual(formatsOf(run.sent), [['1', summarize, 2], ['2', summarize, 2], ['3', summarize, 2]], mode);
+    assert.deepEqual(side.stamps, [1, 2, 3].map((n) => keyOf(n, ages[n], mode, 2)), mode);
+    assert.deepEqual(side.lookups.filter((key) => key.startsWith('MstkThread')), [], `${mode}: a legacy key was looked up`);
+    assert.deepEqual(core.writes, [], mode);
+  }
+});
+
+test('under format 1 the same keys send nothing: the served mode\'s key counts, as before', async () => {
+  const keys = [1, 2].flatMap((n) => [keyOf(n, n, 'summary'), keyOf(n, n, 'detail'), legacyKeyOf(n, n)]);
+  const side = rexSpider({ keys });
+  const run = await pass(site({ pages: [[thread(1, 1), thread(2, 2)]] }), side, { core: rexCore({ mode: { mode: 'detail', since: NOW - 400 * DAY } }) });
+  assert.deepEqual(run.sent, []);
+  assert.equal(withoutMs(run.outcome.reason), 'ok seen=2 dispatched=0');
+});
+
+// The summary in a failed detail's place goes out unless one went out at that
+// time under the pass's format: format 1's summary key does not count.
+test('under format 2, a failed read sends its summary in its place, as format 2, when only format 1 keys are held, and looks up format 2\'s summary key', async () => {
+  const side = rexSpider({ halt: false, format: 2, keys: [keyOf(1, 10, 'summary'), keyOf(1, 10, 'detail'), legacyKeyOf(1, 10)] });
+  const core = rexCore({ mode: { mode: 'detail', since: NOW - 400 * DAY } });
+  const run = await pass(site({ pages: [[thread(1, 10)]], folwrs: { 1: failing(500) } }), side, { core });
+  assert.deepEqual(readsOf(run.events), [1]);
+  assert.deepEqual(formatsOf(run.sent), [['1', true, 2]]);
+  assert.ok(side.lookups.includes(keyOf(1, 10, 'summary', 2)), 'the format 2 summary key was not looked up');
+  assert.deepEqual(side.stamps, []);
+  assert.deepEqual(core.memoWrites.map(([id, memo]) => [short(id), memo.failures]), [['1-f2', 1]]);
+  assert.equal(withoutMs(run.outcome.reason), 'ok seen=1 dispatched=1 failed=1');
+});
+
+test('under format 2, a failed read sends no summary in its place when format 2\'s summary key is held at that time, and the memo is still written', async () => {
+  // Sent as a format 2 summary 10 days ago, before the switch to detail, so re-sent in detail; the read fails.
+  const side = rexSpider({ halt: false, format: 2, keys: [keyOf(1, 10, 'summary', 2)] });
+  const core = rexCore({ mode: { mode: 'summary', since: NOW - 200 * DAY } });
+  const run = await pass(site({ pages: [[thread(1, 10)]], folwrs: { 1: failing(500) } }), side, { core });
+  assert.deepEqual(readsOf(run.events), [1]);
+  assert.deepEqual(run.sent, []);
+  assert.deepEqual(core.memoWrites.map(([id]) => short(id)), ['1-f2']);
+});
+
+test('under format 2 the read budget is the same: with 14 reads stored in the last hour, one thread is read and the pass stops as read-budget', async () => {
+  const reads = Array.from({ length: 14 }, (_, k) => NOW - (k + 1) * MINUTE);
+  const side = rexSpider({ format: 2 });
+  const run = await pass(site({ pages: [[thread(1, 1), thread(2, 2)]] }), side, { core: rexCore({ reads }) });
+  assert.deepEqual(readsOf(run.events), [1]);
+  assert.deepEqual(side.stamps, [keyOf(1, 1, 'detail', 2)]);
+  assert.equal(withoutMs(run.outcome.reason), 'ok seen=2 dispatched=1 left=1 stop=read-budget');
+});
+
+// A failed read's memo is the format's own. Under format 2 a memo written
+// under format 1 holds nothing back, so a thread whose read failed before the
+// change is read at once, and gets its summary in the detail's place if the
+// read fails again; format 1's memo stays as it was.
+test('under format 2, a format 1 memo of this list time does not hold its thread back: it is read and sent, and that memo is left as it was', async () => {
+  const memo: DetailMemo = { ended: keyMs(1), at: NOW - 1000, retryMs: LATE, failures: 2 };
+  const one = rexCore({ memos: { [mtid(1)]: memo } });
+  const held = await pass(site({ pages: [[thread(1, 1)]] }), rexSpider(), { core: one });
+  assert.deepEqual(readsOf(held.events), [], 'format 1 holds it');
+  assert.equal(withoutMs(held.outcome.reason), 'ok seen=1 dispatched=0 held=1');
+
+  const core = rexCore({ memos: { [mtid(1)]: memo } });
+  const side = rexSpider({ format: 2 });
+  const run = await pass(site({ pages: [[thread(1, 1)]] }), side, { core });
+  assert.deepEqual(readsOf(run.events), [1]);
+  assert.deepEqual(formatsOf(run.sent), [['1', false, 2]]);
+  assert.deepEqual(side.stamps, [keyOf(1, 1, 'detail', 2)]);
+  assert.deepEqual([core.memoWrites, core.memoClears], [[], []]);
+  assert.deepEqual(core.memos.get(mtid(1)), memo);
+});
+
+test('under format 2, a format 1 memo does not count a failure either: a failed read is a first failure, with its summary and a format 2 memo of 1 day', async () => {
+  const memo: DetailMemo = { ended: keyMs(1), at: NOW - 2 * DAY, retryMs: SOON, failures: 1 };
+  const core = rexCore({ memos: { [mtid(1)]: memo } });
+  const run = await pass(site({ pages: [[thread(1, 1)]], folwrs: { 1: failing(500) } }), rexSpider({ halt: false, format: 2 }), { core });
+  assert.deepEqual(formatsOf(run.sent), [['1', true, 2]]);
+  assert.deepEqual(core.memoWrites.map(([id, written]) => [short(id), written.retryMs, written.failures]), [['1-f2', SOON, 1]]);
+  assert.deepEqual(core.memos.get(mtid(1)), memo);
+});
+
+test('under format 2, a format 2 memo holds its thread back until its retry time, as format 1\'s does; a failure then sends no second summary and waits 7 days', async () => {
+  // crawl_delay 0, so the memos are read at the pass's starting time.
+  const side = rexSpider({ halt: false, crawlDelay: 0, format: 2 });
+  const core = rexCore();
+  const options = { pages: [[thread(1, 1)]], folwrs: { 1: failing(500) } };
+  const first = await pass(site(options), side, { core });
+  assert.deepEqual(formatsOf(first.sent), [['1', true, 2]]);
+  assert.deepEqual(core.memoWrites.map(([id]) => short(id)), ['1-f2']);
+  assert.equal(core.memos.has(mtid(1)), false, 'a format 1 memo was written');
+  const memo = core.memos.get(`${mtid(1)}-f2`) as DetailMemo;
+  assert.equal(memo.retryMs, SOON);
+  const held = await pass(site(options), side, { core, now: memo.at + memo.retryMs - 1 });
+  assert.deepEqual(requestsOf(held.events), ['home', 'list 0']);
+  assert.equal(withoutMs(held.outcome.reason), 'ok seen=1 dispatched=0 held=1');
+  const again = await pass(site(options), side, { core, now: memo.at + memo.retryMs });
+  assert.deepEqual(readsOf(again.events), [1]);
+  assert.deepEqual(again.sent, []);
+  const repeat = core.memos.get(`${mtid(1)}-f2`) as DetailMemo;
+  assert.deepEqual([repeat.failures, repeat.retryMs], [2, LATE]);
+});
+
+test('under format 2, a read that works clears the format 2 memo, and only that one', async () => {
+  const stale: DetailMemo = { ended: keyMs(2), at: NOW - 1000, retryMs: LATE, failures: 1 };
+  const core = rexCore({ memos: { [mtid(1)]: stale, [`${mtid(1)}-f2`]: stale } });
+  const run = await pass(site({ pages: [[thread(1, 1)]] }), rexSpider({ format: 2 }), { core });
+  assert.deepEqual(readsOf(run.events), [1]);
+  assert.deepEqual(core.memoClears.map(short), ['1-f2']);
+  assert.deepEqual(core.memos.get(mtid(1)), stale);
+});
+
+// The spider hands in a format it has checked; one that is not a whole
+// number from 1 to 999 is a wiring mistake, and nothing goes out under it.
+test('a data format that is not a whole number from 1 to 999 sends nothing: the key lookups fail and the pass stops as internal', async () => {
+  for (const format of [0, 1.5, 1000, NaN, undefined]) {
+    for (const summarize of [true, false]) {
+      const run = await pass(site({ pages: [[thread(1, 1)]] }), rexSpider({ summarize, format: () => format as number }));
+      assert.deepEqual([run.sent, readsOf(run.events)], [[], []], `${String(format)}, summarize ${summarize}`);
+      assert.equal(withoutMs(run.outcome.reason), 'ok seen=1 dispatched=0 stop=internal', `${String(format)}, summarize ${summarize}`);
+    }
+  }
+});
+
 // ---- the store ----
 
 test('a key lookup that never answers stops the sending with nothing sent: its deadline rejects, and never reads as not sent', { timeout: 5000 }, async () => {
@@ -1008,9 +1184,9 @@ test('a hash that never answers gives null hashes, and the records still go out'
 // real one throw; this stands in for a fault in a later build).
 const throwsOn = (n: number): Records => ({
   summary: buildSummaryRecord,
-  detail: (entry, titleHash, parsed, caps) => {
+  detail: (entry, titleHash, parsed, caps, format) => {
     if (entry.mtid === mtid(n)) throw new TypeError('the builder broke');
-    return buildDetailRecord(entry, titleHash, parsed, caps);
+    return buildDetailRecord(entry, titleHash, parsed, caps, format);
   },
 });
 

@@ -24,7 +24,7 @@ const ID_MARK = 'idform-marker-0123';
 
 const sha256 = (text: string): string => createHash('sha256').update(text, 'utf8').digest('hex');
 const plain = (value: unknown): Json => JSON.parse(JSON.stringify(value)) as Json;
-const redact = (event: unknown): Json => redactGoogleAiMode(event as Json);
+const redact = (event: unknown, format = 1): Json => redactGoogleAiMode(event as Json, format);
 
 // What the extension uploads: rex-content-processing walks the processor's
 // output and copies each object's own keys into a plain one, so a DateString
@@ -63,8 +63,8 @@ function oldPoint(entry: unknown[]): Json {
 // the title, or null for none. Made here without a promise, since this
 // repo's target has no top-level await.
 const titleHash = (entry: ListEntry): string | null => (entry.title === null ? null : sha256(entry.title));
-const summaryOf = (entry: ListEntry): Json => buildSummaryRecord(entry, titleHash(entry)) as unknown as Json;
-const detailOf = (entry: ListEntry, parsed: ParsedThread, options?: DetailOptions): Json => buildDetailRecord(entry, titleHash(entry), parsed, options) as unknown as Json;
+const summaryOf = (entry: ListEntry, format = 1): Json => buildSummaryRecord(entry, titleHash(entry), format) as unknown as Json;
+const detailOf = (entry: ListEntry, parsed: ParsedThread, options?: DetailOptions, format = 1): Json => buildDetailRecord(entry, titleHash(entry), parsed, options, format) as unknown as Json;
 
 const SMALL: AimTurn[] = [userTurn(12, 3), assistantTurn(840, 131, 6), userTurn(25, 5), assistantTurn(1203, 188, 0)];
 const parsed = (...specs: object[]): ParsedThread => parseTurns(threadHtml(specs));
@@ -107,7 +107,7 @@ const SCAFFOLD_FORMS: Readonly<Record<string, (value: unknown) => boolean>> = {
   _pdk_trace_context: (value) => value !== undefined,
   'passive-data-metadata': (value) => value !== undefined,
 };
-function assertInForm(out: Json, what: string): void {
+function assertInForm(out: Json, what: string, format = 1): void {
   if (typeof out.is_summary !== 'boolean') {
     for (const [key, value] of Object.entries(out)) {
       assert.ok(Object.prototype.hasOwnProperty.call(SCAFFOLD_FORMS, key) && SCAFFOLD_FORMS[key](value), `${what}: the scaffold's ${key}`);
@@ -115,7 +115,7 @@ function assertInForm(out: Json, what: string): void {
     return;
   }
   assert.deepEqual(Object.keys(out).filter((key) => !ENVELOPE.includes(key)), out.is_summary ? SUMMARY_KEYS : DETAIL_KEYS, `${what}: keys`);
-  assert.deepEqual([out.name, out.platform, out.format_version], [NAME, PLATFORM, 1], `${what}: name, platform, format_version`);
+  assert.deepEqual([out.name, out.platform, out.format_version], [NAME, PLATFORM, format], `${what}: name, platform, format_version`);
   assert.ok(out.identifier === null || (typeof out.identifier === 'string' && ID.test(out.identifier)), `${what}: identifier`);
   for (const key of ['started', 'ended']) {
     const date = out[key];
@@ -251,6 +251,74 @@ test('a point that is not a format 1 record of this platform, or whose top level
   // Every case runs before the test fails, so one break shows each case it lets through.
   const wrong = cases.filter(([, event, expected]) => !isDeepStrictEqual(redact(event), expected)).map(([what]) => what);
   assert.deepEqual(wrong, []);
+});
+
+// The accepted format is the caller's: the extension hands in its data
+// format, the one it serves the spider. The same fixtures, built under
+// format 2.
+const RECORDS_F2: ReadonlyArray<[string, Json]> = [
+  ['summary of a titled entry', summaryOf(listEntry(), 2)],
+  ['summary of an entry never updated', summaryOf(listEntry({ 6: null }), 2)],
+  ['summary of an entry whose [6] is before its [5]', summaryOf(listEntry({ 6: [CREATED_S - 42, 263_669_000] }), 2)],
+  ['detail of a two-question thread', detailOf(listEntry(), thread(SMALL), undefined, 2)],
+  ['detail of an entry whose [6] is before its [5]', detailOf(listEntry({ 6: [CREATED_S - 42, 263_669_000] }), thread(SMALL), undefined, 2)],
+  ['detail cut to the newest four turns', detailOf(listEntry(), thread(numberedTurns(10)), { maxTurns: 4 }, 2)],
+  ['detail of an untitled entry with null counts and no block count', detailOf(listEntry({ 1: null }), thread([userTurn(null, null), assistantTurn(null, null, null)], true, -1), undefined, 2)],
+];
+
+test('with format 2 accepted, a record the builders made under format 2 comes back equal, as built and as the walker leaves its times', () => {
+  for (const [what, record] of RECORDS_F2) {
+    assert.equal(record.format_version, 2, `Test setup invalid: ${what} is not format 2`);
+    const started = record.started as DateString;
+    const ended = record.ended as DateString;
+    for (const [form, event] of [['as built', record], ['as the walker leaves it', { ...record, started: { ...started }, ended: { ...ended } }]] as const) {
+      const out = redact(event, 2);
+      assert.equal(wire(out), wire(record), `${what}, ${form}`);
+      assertInForm(out, `${what}, ${form}`, 2);
+    }
+  }
+});
+
+test('a record of one format is cut to the scaffold when another is accepted: format 1 under 2, format 2 under 1 or 3', () => {
+  const ones = RECORDS.map(([what, record]): [string, Json, number] => [`${what}, format 1 under 2`, record, 2]);
+  const twos = RECORDS_F2.flatMap(([what, record]): [string, Json, number][] => [[`${what}, format 2 under 1`, record, 1], [`${what}, format 2 under 3`, record, 3]]);
+  const wrong = [...ones, ...twos].filter(([, record, format]) => !isDeepStrictEqual(redact(record, format), scaffoldOf(record))).map(([what]) => what);
+  assert.deepEqual(wrong, []);
+});
+
+// The accepted format must be a whole number from 1 to 999, so a caller that
+// leaves it out, or hands in another form, lets no record through: not one
+// without a format_version, as the old crawler's points are, nor one whose
+// format_version is that same value.
+test('an accepted format that is not a whole number from 1 to 999 accepts no record, even one stamped with that same value', () => {
+  const cases: Array<[string, unknown, Json]> = [];
+  for (const format of [undefined, null, 0, -1, 1.5, NaN, 1000, '1', '2', true]) {
+    cases.push([`format ${String(format)}, a format 1 summary`, format, SUMMARY]);
+    cases.push([`format ${String(format)}, a format 1 detail`, format, DETAIL]);
+    cases.push([`format ${String(format)}, a summary stamped with it`, format, { ...SUMMARY, format_version: format }]);
+    cases.push([`format ${String(format)}, a detail stamped with it`, format, { ...DETAIL, format_version: format }]);
+  }
+  const wrong = cases.filter(([, format, record]) => !isDeepStrictEqual(redactGoogleAiMode(record, format as number), scaffoldOf(record))).map(([what]) => what);
+  assert.deepEqual(wrong, []);
+  // The old crawler's point, which has no format_version, with none accepted.
+  assert.deepEqual(redactGoogleAiMode(oldPoint(oldEntry()), undefined as unknown as number), { date: UPDATED_S * 1000, name: NAME, platform: PLATFORM });
+});
+
+test('under format 2, a marker planted in any one field of a record, or in all of them at once, never goes out', () => {
+  let kept = 0;
+  for (const [what, record] of RECORDS_F2) {
+    for (const path of placesOf(record)) {
+      const out = redact(departed(record, path, () => {
+        const held = valueAt(record, path);
+        return typeof held === 'string' ? `${held}${MARK}` : MARK;
+      }), 2);
+      assert.equal(wire(out).includes(MARK), false, `${what}: ${path.join('.')}`);
+      assertInForm(out, `${what}: ${path.join('.')}`, 2);
+      kept += typeof out.is_summary === 'boolean' ? 1 : 0;
+    }
+    assert.equal(wire(redact(markLeaves(record), 2)).includes(MARK), false, `${what}: every leaf`);
+  }
+  assert.ok(kept > 100, `Test setup invalid: only ${kept} marked records were kept as records`);
 });
 
 test('a list time at the edges of 2001 to 2286: a started and ended from 1e9 to 1e10 - 1 seconds come back equal, either one second outside cuts the record to the scaffold, and a [5] past it with [6] before it goes out as created_at', () => {

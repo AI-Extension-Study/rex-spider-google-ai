@@ -1,18 +1,17 @@
 // The rex-conversation records the spider sends, in the shared conversation
-// record layout (format 1): a summary record from a list entry, and a detail
-// record from a list entry and the turns read from its thread. Nothing in
-// them is text from the list or the thread. Of the entry a record keeps the
-// mtid, the two times and the small integers of LIST_NUMBER_KEYS; the title
-// goes out only as its SHA-256, which the spider makes with hashTitle before
-// building the record. Never the mstk, which the thread's URL carries, and no
-// other position of the entry. The builders read no configuration: summary
-// or detail is the caller's choice. Pure.
+// record layout: a summary record from a list entry, and a detail record from
+// a list entry and the turns read from its thread. Each carries the pass's
+// data format (format.mts) as format_version. Nothing in them is text from
+// the list or the thread. Of the entry a record keeps the mtid, the two times
+// and the small integers of LIST_NUMBER_KEYS; the title goes out only as its
+// SHA-256, which the spider makes with hashTitle before building the record.
+// Never the mstk, which the thread's URL carries, and no other position of
+// the entry. The builders read no configuration: summary or detail, and the
+// data format, are the caller's to hand in. Pure.
 import type { DateString } from '@bric/rex-types/types';
 
 import type { ListEntry } from './list.mts';
 import { LIST_NUMBER_KEYS } from './list.mts';
-
-export const FORMAT_VERSION = 1;
 
 const NAME = 'rex-conversation';
 const PLATFORM = 'google-ai-mode';
@@ -72,7 +71,8 @@ export interface AimRecord {
   name: typeof NAME;
   platform: typeof PLATFORM;
   identifier: string;
-  format_version: typeof FORMAT_VERSION;
+  // The data format the pass ran, handed in.
+  format_version: number;
   is_summary: boolean;
   date: number;
   started: DateString;
@@ -150,12 +150,12 @@ function startOf(entry: ListEntry): DateString {
 
 // A summary record: no turns and no turns_complete. Its date, ended in epoch
 // ms, is the time the upload key is built from (keys.mts).
-export function buildSummaryRecord(entry: ListEntry, titleHash: string | null): AimRecord {
+export function buildSummaryRecord(entry: ListEntry, titleHash: string | null, format: number): AimRecord {
   return {
     name: NAME,
     platform: PLATFORM,
     identifier: entry.mtid,
-    format_version: FORMAT_VERSION,
+    format_version: format,
     is_summary: true,
     date: entry.updated.timestamp(),
     started: startOf(entry),
@@ -201,8 +201,9 @@ function newest(turns: readonly AimTurn[], maxTurns: number, jsonLimit: number):
 
 // A detail record: the thread's turns, cut to the caps, and its block count.
 // turns_complete is the thread's complete unless a cap cut a turn. Its date
-// is started in epoch ms, which the list always gives.
-export function buildDetailRecord(entry: ListEntry, titleHash: string | null, thread: ParsedThread, { maxTurns = MAX_TURNS, turnsJsonLimit = TURNS_JSON_LIMIT }: DetailOptions = {}): AimRecord {
+// is started in epoch ms, which the list always gives. The caps stay before
+// the format, so a caller that keeps their defaults hands in {} or undefined.
+export function buildDetailRecord(entry: ListEntry, titleHash: string | null, thread: ParsedThread, { maxTurns = MAX_TURNS, turnsJsonLimit = TURNS_JSON_LIMIT }: DetailOptions = {}, format: number): AimRecord {
   const all = thread.turns.map(turnOf);
   const turns = newest(all, maxTurns, turnsJsonLimit);
   const started = startOf(entry);
@@ -210,7 +211,7 @@ export function buildDetailRecord(entry: ListEntry, titleHash: string | null, th
     name: NAME,
     platform: PLATFORM,
     identifier: entry.mtid,
-    format_version: FORMAT_VERSION,
+    format_version: format,
     is_summary: false,
     date: started.timestamp(),
     started,
