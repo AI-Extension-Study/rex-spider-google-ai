@@ -82,11 +82,12 @@ A turn is one question or one answer, two per turn block, in the thread's order:
 
 **Null when unreadable.** The question's counts are null when the turn has no question heading, or the heading has no label (`src/turns.mts:468-476`). The answer's counts and citations are null when its body is not found. `citation_count` is also null when the answer has no marker but links outside Google, which means it cites in a way the count cannot see (`src/turns.mts:478-498`).
 
-**`turns_complete` is false when** (`src/turns.mts:514-517`, `src/read.mts:140`, `src/record.mts:202-219`):
-- the thread held no turn block;
+**`turns_complete` is false when** (`src/turns.mts:514-517`, `src/read.mts`, `src/record.mts:202-219`):
 - a block lacked its question or answer, or the question headings did not number the blocks;
 - the stream did not end whole;
 - the turns were cut to the newest 1,000 or to 512 Ki characters of JSON.
+
+A stream with no turn block, or none whose answer body is found, gives no detail record at all: it is a layout failure (see "When something fails"), since every thread has at least one turn.
 
 ## Modes and the re-send
 
@@ -124,9 +125,9 @@ The hash uses no secret key, so someone who guesses a title exactly can confirm 
   - The back-off is read with rex-core's 1 s store deadline, and once more with 20 s when that gets no answer, since the extension's uploads share the same database. A pass goes ahead only when neither read answers.
   - Before a refusal's back-off is written, the stored one is read again, and the new one never waits less or counts fewer refusals than it, so a back-off the pass could not read is doubled, not restarted (`src/pass.mts`, `laterBackoff` in `src/backoff.mts`).
 - **Sign-out.** A home page without `SignOutOptions`, a 401 anywhere, or a list page after a cursor with no entry list (`[]`, as a session signed out mid-walk answers; an empty last page `[null, null, 1]` is not one) ends the pass as not signed in, with no back-off (`src/list.mts:245-249`). A thread page that lacks a value but still holds one of the four attributes gets the same home check before its failure counts.
-- **Any other failed read is that thread's alone.** That covers a page lacking a value or holding one out of form, a broken stream, a body over the cap, a 403, a 404, a 5xx and no answer.
+- **Any other failed read is that thread's alone.** That covers a page lacking a value or holding one out of form, a stream with no turn block or no answer found in any turn, a broken stream, a body over the cap, a 403, a 404, a 5xx and no answer.
   - Its summary record goes out in the detail's place, once per last use, unless one already went out at that time. It gets no key, so the detail read comes again.
-  - A memo (`rex-spider-google-ai-detail-memo-<mtid>`) then holds the thread back. It waits 1 day after a first failure that may pass by itself (no answer, a 5xx or a redirect not followed, a page lacking a value, a broken stream), and 7 days otherwise or on a repeat. A thread used since is read at once.
+  - A memo (`rex-spider-google-ai-detail-memo-<mtid>`) then holds the thread back. It waits 1 day after a first failure that may pass by itself (no answer, a 5xx or a redirect not followed, a page lacking a value, a stream with no answer found, a broken stream), and 7 days otherwise or on a repeat. A thread used since is read at once.
   - Three failed reads in a row end the reads, or the first with `halt_on_error` (see "Settings it reads").
 
 ## Reading the completion events

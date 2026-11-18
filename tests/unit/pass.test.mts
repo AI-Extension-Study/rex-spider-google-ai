@@ -1137,6 +1137,39 @@ test('a home check that cannot tell (a 500, no answer) lets the layout failure c
   }
 });
 
+// A whole stream with no turn block, or none whose answer is found: the
+// parser no longer sees Google's markup, so the read is a layout failure. Its
+// summary goes out with a 1-day memo and no detail key, and the thread is read
+// again once the memo runs out.
+test('a stream with no turn block, or no answer found in any turn, is a layout failure: the home check, its summary, a 1-day memo and no detail key', async () => {
+  for (const [what, stream] of [['no turn block', threadStream([])], ['no answer found', threadStream([{ controls: 0 }])]] as const) {
+    const side = rexSpider({ halt: false, crawlDelay: 0 });
+    const core = rexCore();
+    const run = await pass(site({ pages: [[thread(1, 1)]], folwrs: { 1: ok(stream) } }), side, { core });
+    assert.deepEqual(requestsOf(run.events), ['home', 'list 0', 'page 1', 'folwr 1', 'home'], what);
+    assert.deepEqual(kindsOf(run.sent), [['1', true]], what);
+    assert.deepEqual(side.stamps, [], what);
+    assert.deepEqual(core.memoWrites.map(([id, memo]) => [short(id), memo.retryMs, memo.failures]), [['1', SOON, 1]], what);
+    assert.equal(withoutMs(run.outcome.reason), 'ok seen=1 dispatched=1 failed=1', what);
+    const memo = core.memos.get(mtid(1)) as DetailMemo;
+    const held = await pass(site({ pages: [[thread(1, 1)]] }), side, { core, now: memo.at + memo.retryMs - 1 });
+    assert.deepEqual(readsOf(held.events), [], what);
+    const again = await pass(site({ pages: [[thread(1, 1)]] }), side, { core, now: memo.at + memo.retryMs });
+    assert.deepEqual(readsOf(again.events), [1], what);
+    assert.deepEqual(kindsOf(again.sent), [['1', false]], what);
+    assert.deepEqual(side.stamps, [keyOf(1, 1, 'detail')], what);
+  }
+});
+
+test('a stream in which only some answers are found is still a detail record, with turns_complete false and its detail key', async () => {
+  const side = rexSpider({ halt: false });
+  const run = await pass(site({ pages: [[thread(1, 1)]], folwrs: { 1: ok(threadStream([{}, { controls: 0 }])) } }), side);
+  assert.deepEqual(kindsOf(run.sent), [['1', false]]);
+  assert.deepEqual([run.sent[0].turns_complete, (run.sent[0].turns as unknown[]).length], [false, 4]);
+  assert.deepEqual(side.stamps, [keyOf(1, 1, 'detail')]);
+  assert.equal(withoutMs(run.outcome.reason), 'ok seen=1 dispatched=1');
+});
+
 test('a read that fails sends the summary in its place, with a memo of 1 day for a failure that may pass and 7 days otherwise', async () => {
   const cases: [string, SiteOptions, Readonly<Record<string, RequestError>>, number][] = [
     ['a 500 on the page', { threadPages: { 1: failing(500) } }, {}, SOON],

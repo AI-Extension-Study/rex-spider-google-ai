@@ -131,6 +131,30 @@ test('readThread makes exactly two requests, the page then folwr, with pace() be
   assert.equal(result.ok && result.thread.turns.length, 4);
 });
 
+// Every thread has at least one turn, so a stream with no turn block, or
+// none whose answer body is found, means the parser no longer sees Google's
+// markup: a layout failure, as a page without its values is, never a record.
+// A detail record would take the detail key, and the thread would not be
+// read again at this list time.
+test('a whole stream with no turn block is a layout failure, after both requests', async () => {
+  const { result, events } = await read([PAGE, answer(200, threadStream([]))]);
+  assert.deepEqual(result, { ok: false, failure: 'layout', answer: null });
+  assert.deepEqual(events, [`get ${PAGE_URL}`, 'pace', `get ${FOLWR_URL}`]);
+});
+
+test('a stream in which no turn\'s answer body is found is a layout failure too', async () => {
+  const stream = threadStream([{ controls: 0 }, { controls: 0 }]);
+  assert.equal(parseTurns(threadHtml([{ controls: 0 }, { controls: 0 }])).blocks, 2, 'Test setup invalid: the turn blocks were not found');
+  assert.deepEqual((await read([PAGE, answer(200, stream)])).result, { ok: false, failure: 'layout', answer: null });
+});
+
+test('a stream in which only some answers are not found is read, with complete false', async () => {
+  const { result } = await read([PAGE, answer(200, threadStream([{}, { controls: 0 }]))]);
+  assert.equal(result.ok, true);
+  const turns = result.ok ? result.thread.turns : [];
+  assert.deepEqual([result.ok && result.thread.complete, turns.length, turns[1].text_chars === null, turns[3].text_chars, turns[3].citation_count], [false, 4, false, null, null]);
+});
+
 test('a stream that is not whole gives its turns, with complete false', async () => {
   // Cut at a chunk boundary before the root's empty fill, so its
   // placeholder stays open.

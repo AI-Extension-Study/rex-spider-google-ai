@@ -20,12 +20,13 @@ export interface FolwrValues {
 
 // layout: the thread page lacks a value, or holds one out of its form, but
 // holds at least one of the four data- attributes that carry four of the
-// values. limited: it holds none of those four in any form, as Google's
-// limited page, its answer to too many reads, does (the pass stops on it
-// with a back-off). stream: the folwr body has no guard or a chunk cannot be
-// walked. too-large: the folwr body is over
-// FOLWR_TEXT_CAP and was not read. network: a request got no answer. The
-// rest are the answer's classification.
+// values; or the folwr stream gives no turn block, or none whose answer body
+// was found. limited: the page holds none of those four in any form, as
+// Google's limited page, its answer to too many reads, does (the pass stops
+// on it with a back-off). stream: the folwr body has no guard or a chunk
+// cannot be walked. too-large: the folwr body is over FOLWR_TEXT_CAP and was
+// not read. network: a request got no answer. The rest are the answer's
+// classification.
 export type ReadFailure = 'layout' | 'limited' | 'stream' | 'too-large' | Exclude<Classification, 'ok'> | 'network';
 
 // A failure's answer is the one whose classification ended the read, so the
@@ -137,5 +138,13 @@ export async function readThread(client: Client, entry: ListEntry, pace: () => P
     return failed('stream', null);
   }
   const thread = parseTurns(unchunked.html);
+  // Every thread has at least one turn, so no turn block, or none whose
+  // answer body was found (parseTurns gives an answer null counts only
+  // then), means the parser no longer sees Google's markup. As a record it
+  // would take the detail key, and the thread would not be read again at
+  // this list time.
+  if (!thread.turns.some((turn) => turn.speaker === 'assistant' && turn.text_chars !== null)) {
+    return failed('layout', null);
+  }
   return { ok: true, thread: { ...thread, complete: thread.complete && unchunked.whole } };
 }
