@@ -173,6 +173,10 @@ interface CoreOptions {
   readonly memoUnkept?: boolean;
   readonly backoff?: BackoffState | null;
   readonly backoffUnanswered?: boolean;
+  // The first this many back-off reads get no answer; the rest answer.
+  readonly backoffUnansweredReads?: number;
+  // Back-off reads from this one on (counted from 1) get no answer.
+  readonly backoffSilentFrom?: number;
   // The thread reads' times as stored, and how their store fails: no answer
   // (flagged), a value of another form, a write not kept, a call that never
   // settles, or one that rejects.
@@ -194,9 +198,11 @@ function rexCore(options: CoreOptions = {}) {
   const memoWrites: [string, DetailMemo][] = [];
   const memoClears: string[] = [];
   const backoffWrites: (BackoffState | null)[] = [];
+  // The deadline each back-off read was given, undefined for the store's own.
+  const backoffReads: (number | undefined)[] = [];
   const malformed = new Set(options.memoMalformed ?? []);
   return {
-    held, writes, memos, memoWrites, memoClears, backoffWrites, readsWrites,
+    held, writes, memos, memoWrites, memoClears, backoffWrites, backoffReads, readsWrites,
     store: {
       mode: {
         get: async (): Promise<Read<ModeRecord>> => {
@@ -230,7 +236,11 @@ function rexCore(options: CoreOptions = {}) {
         },
       },
       backoff: {
-        get: async (): Promise<Read<BackoffState>> => ({ value: options.backoffUnanswered === true ? null : held.backoff, unanswered: options.backoffUnanswered === true, malformed: false }),
+        get: async (deadlineMs?: number): Promise<Read<BackoffState>> => {
+          backoffReads.push(deadlineMs);
+          const silent = options.backoffUnanswered === true || backoffReads.length <= (options.backoffUnansweredReads ?? 0) || backoffReads.length >= (options.backoffSilentFrom ?? Infinity);
+          return { value: silent ? null : held.backoff, unanswered: silent, malformed: false };
+        },
         set: async (state: BackoffState | null): Promise<Write> => {
           backoffWrites.push(state);
           held.backoff = state;
@@ -358,9 +368,9 @@ async function pass(web: ReturnType<typeof site>, side: ReturnType<typeof rexSpi
         },
       },
       backoff: {
-        get: () => {
+        get: (deadlineMs) => {
           trace.push('backoff get');
-          return core.store.backoff.get();
+          return core.store.backoff.get(deadlineMs);
         },
         set: (state) => {
           trace.push('backoff set');
@@ -1523,6 +1533,57 @@ test('a stored back-off more than 6 hours ahead is ignored, and the pass runs', 
   assert.ok(web.requests.length > 0);
   assert.equal(withoutMs(run.outcome.reason), 'ok seen=1 dispatched=1');
   assert.deepEqual(core.backoffWrites, [null]);
+});
+
+// The back-off is read through rex-core's store, whose 1 s deadline the
+// extension's own uploads, which share its database, can outlast. A read that
+// gets no answer is made once more with the pass's store deadline (20 s in
+// the worker, 50 ms here), and persist reads it again before it writes, so a
+// stored back-off is doubled, never restarted, by the next refusal.
+test('a back-off read with no answer is made again with the longer deadline, and a running back-off then skips the pass with no request', async () => {
+  const running: BackoffState = { until: NOW + 5 * 60 * MINUTE, failures: 7, code: 'challenge' };
+  const core = rexCore({ backoff: running, backoffUnansweredReads: 1 });
+  const web = site({ home: SORRY, pages: [[thread(1, 1)]] });
+  const run = await pass(web, rexSpider(), { core });
+  assert.deepEqual(web.requests, []);
+  assert.deepEqual(core.backoffReads, [undefined, 50]);
+  assert.equal(run.outcome.reason, `backoff until=${new Date(running.until).toISOString()} code=challenge`);
+  assert.deepEqual(core.backoffWrites, []);
+});
+
+test('a back-off read with no answer at first, then a refusal in the pass: the stored back-off doubles, and does not reset', async () => {
+  const core = rexCore({ backoff: { until: NOW - 1, failures: 5, code: 'challenge' }, backoffUnansweredReads: 1 });
+  const run = await pass(site({ home: SORRY }), rexSpider(), { core });
+  assert.equal(withoutMs(run.outcome.reason), 'challenge stage=home status=429');
+  assert.deepEqual(core.backoffWrites, [{ until: run.clock() + 160 * MINUTE, failures: 6, code: 'challenge' }]);
+});
+
+test('a back-off that answered neither read at the start is read again before the refusal is written, and its later until and larger failures are kept', async () => {
+  const running: BackoffState = { until: NOW + 5 * 60 * MINUTE, failures: 7, code: 'challenge' };
+  const doubled = rexCore({ backoff: running, backoffUnansweredReads: 2 });
+  const first = await pass(site({ home: SORRY }), rexSpider(), { core: doubled });
+  assert.equal(withoutMs(first.outcome.reason), 'challenge stage=home status=429');
+  assert.deepEqual(doubled.backoffReads, [undefined, 50, 50]);
+  assert.deepEqual(doubled.backoffWrites, [{ until: first.clock() + 6 * 60 * MINUTE, failures: 8, code: 'challenge' }]);
+  // A 429 after a limited page's 60 minutes asks for 10; the stored 59 left are kept.
+  const limited: BackoffState = { until: NOW + 59 * MINUTE, failures: 1, code: 'limited' };
+  const kept = rexCore({ backoff: limited, backoffUnansweredReads: 2 });
+  await pass(site({ home: failing(429) }), rexSpider(), { core: kept });
+  assert.deepEqual(kept.backoffWrites, [{ until: limited.until, failures: 2, code: 'limited' }]);
+});
+
+test('a back-off read at the start whose re-read before the write gets no answer is built on what the pass read', async () => {
+  const core = rexCore({ backoff: { until: NOW - 1, failures: 3, code: 'rate-limited' }, backoffSilentFrom: 2 });
+  const run = await pass(site({ home: failing(429) }), rexSpider(), { core });
+  assert.deepEqual(core.backoffReads, [undefined, 50]);
+  assert.deepEqual(core.backoffWrites, [{ until: run.clock() + 40 * MINUTE, failures: 4, code: 'rate-limited' }]);
+});
+
+test('a back-off that answers no read at all lets a refusal write its first step', async () => {
+  const core = rexCore({ backoff: { until: NOW + 5 * 60 * MINUTE, failures: 7, code: 'challenge' }, backoffUnanswered: true });
+  const run = await pass(site({ home: SORRY }), rexSpider(), { core });
+  assert.deepEqual(core.backoffReads, [undefined, 50, 50]);
+  assert.deepEqual(core.backoffWrites, [{ until: run.clock() + 5 * MINUTE, failures: 1, code: 'challenge' }]);
 });
 
 test('a back-off that gets no answer does not stop the pass', async () => {

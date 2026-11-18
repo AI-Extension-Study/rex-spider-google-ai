@@ -60,9 +60,10 @@ export interface AimStore {
     get(): Promise<Read<ModeRecord>>;
     set(record: ModeRecord): Promise<Write>;
   };
-  // null clears it.
+  // null clears it. A read may be given a longer deadline than the store's
+  // own, for a read that must not be lost to a slow database.
   readonly backoff: {
-    get(): Promise<Read<BackoffState>>;
+    get(deadlineMs?: number): Promise<Read<BackoffState>>;
     set(state: BackoffState | null): Promise<Write>;
   };
   readonly memo: {
@@ -103,7 +104,7 @@ export function createStore(handleMessage: HandleMessage, { deadlineMs = STORE_D
   // Sends one message and settles exactly once: with rex-core's answer, or
   // unanswered at the deadline, on a throw, or at once for a read rex-core
   // did not handle. Log lines carry the key's kind, never the key.
-  function ask(message: { messageType: 'fetchValue' | 'storeValue'; key: string; value?: unknown }): Promise<{ answer: unknown; unanswered: boolean }> {
+  function ask(message: { messageType: 'fetchValue' | 'storeValue'; key: string; value?: unknown }, wait: number = deadlineMs): Promise<{ answer: unknown; unanswered: boolean }> {
     const what = `${message.messageType} ${keyKind(message.key)}`;
     return new Promise((resolve) => {
       let settled = false;
@@ -113,7 +114,7 @@ export function createStore(handleMessage: HandleMessage, { deadlineMs = STORE_D
         log(`store: ${what} ${why}`);
         resolve({ answer: undefined, unanswered: true });
       };
-      const timer = setTimeout(() => unanswered(`unanswered after ${deadlineMs} ms`), deadlineMs);
+      const timer = setTimeout(() => unanswered(`unanswered after ${wait} ms`), wait);
       const sendResponse = (answer: unknown) => {
         if (settled) {
           log(`store: late answer to ${what}, ignored`);
@@ -138,8 +139,8 @@ export function createStore(handleMessage: HandleMessage, { deadlineMs = STORE_D
     });
   }
 
-  async function get(key: string): Promise<RawRead> {
-    const { answer, unanswered } = await ask({ messageType: 'fetchValue', key });
+  async function get(key: string, wait?: number): Promise<RawRead> {
+    const { answer, unanswered } = await ask({ messageType: 'fetchValue', key }, wait);
     return { value: unanswered || answer === undefined ? null : answer, unanswered };
   }
 
@@ -148,8 +149,8 @@ export function createStore(handleMessage: HandleMessage, { deadlineMs = STORE_D
     return { ok: answer === true, unanswered };
   }
 
-  async function typed<T>(key: string, isT: (value: unknown) => value is T): Promise<Read<T>> {
-    const raw = await get(key);
+  async function typed<T>(key: string, isT: (value: unknown) => value is T, wait?: number): Promise<Read<T>> {
+    const raw = await get(key, wait);
     if (raw.value === null) {
       return { value: null, unanswered: raw.unanswered, malformed: false };
     }
@@ -169,7 +170,7 @@ export function createStore(handleMessage: HandleMessage, { deadlineMs = STORE_D
     },
     // rex-core has no delete; null reads back as nothing.
     backoff: {
-      get: () => typed(BACKOFF_KEY, isBackoffState),
+      get: (wait) => typed(BACKOFF_KEY, isBackoffState, wait),
       set: (state) => set(BACKOFF_KEY, state),
     },
     reads: {

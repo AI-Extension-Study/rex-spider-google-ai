@@ -27,7 +27,7 @@
 // in the store (budget.mts), and stops once the hour's reads reach it.
 import type { DateString } from '@bric/rex-types/types';
 
-import { type BackoffCode, type BackoffState, backoffDecision, nextBackoff } from './backoff.mts';
+import { type BackoffCode, type BackoffState, backoffDecision, laterBackoff, nextBackoff } from './backoff.mts';
 import { READ_BUDGET, type ReadBudget, readsInWindow, withRead } from './budget.mts';
 import { type Answer, type Client, RequestError, classify, retryAfterMs } from './client.mts';
 import { HOME_URL, isSignedIn } from './home.mts';
@@ -38,7 +38,7 @@ import { TIMED_OUT, crawlDelayMs, touch, withDeadline } from './pacing.mts';
 import { type ReadFailure, type ReadResult, readThread } from './read.mts';
 import { type Cut, type ReasonCode, type ReasonFields, type Stop, formatReason } from './reasons.mts';
 import { type AimRecord, buildDetailRecord, buildSummaryRecord, hashTitle } from './record.mts';
-import type { AimStore, DetailMemo, Mode } from './store.mts';
+import type { AimStore, DetailMemo, Mode, Read } from './store.mts';
 
 // The rex-spider calls the pass makes on the spider. The flags are the
 // served config as of the last refresh, read where they apply: isEnabled
@@ -794,6 +794,18 @@ async function crawlWindow(pass: Pass): Promise<CrawlWindow | null> {
   }
 }
 
+// The back-off read again, with the pass's store deadline (20 s) in place of
+// the store's own (1 s): the extension's uploads share rex-core's database
+// and can hold a read past 1 s. Unanswered when this read gets no answer
+// either.
+async function backoffAgain(pass: Pass): Promise<Read<BackoffState>> {
+  try {
+    return await stored(pass, () => pass.deps.store.backoff.get(pass.limits.storeMs));
+  } catch {
+    return { value: null, unanswered: true, malformed: false };
+  }
+}
+
 async function run(pass: Pass): Promise<PassOutcome> {
   const { deps } = pass;
   const { framework } = deps;
@@ -802,12 +814,18 @@ async function run(pass: Pass): Promise<PassOutcome> {
   if (!framework.isEnabled()) {
     return none(pass, 'disabled', { stage: 'start' });
   }
-  // A back-off still running skips the pass with no request. One that cannot
-  // be read is no reason to skip.
+  // A back-off still running skips the pass with no request. One that gets
+  // no answer is read once more with the longer deadline; one that answers
+  // neither read is no reason to skip, and persist reads it again before it
+  // writes.
   touch(deps.keepAlive, pass.say);
-  const backoff = await deps.store.backoff.get();
+  let backoff = await deps.store.backoff.get();
   if (backoff.unanswered) {
-    pass.say('the back-off got no answer; the pass goes ahead');
+    pass.say('the back-off got no answer; it is read again with a longer deadline');
+    backoff = await backoffAgain(pass);
+    if (backoff.unanswered) {
+      pass.say('the back-off got no answer again; the pass goes ahead');
+    }
   }
   pass.backoff = backoff.value;
   const decision = backoffDecision(backoff.value, pass.now());
@@ -910,14 +928,21 @@ async function run(pass: Pass): Promise<PassOutcome> {
 
 // What outlives the pass. A refusal sets the back-off, longer after each in a
 // row; a pass that read a list page and met none clears it; a pass that read
-// none says nothing of Google, and the back-off stays as it was. Never
-// throws: the outcome is the pass's report, and a store that fails here must
-// not lose it.
+// none says nothing of Google, and the back-off stays as it was. A refusal's
+// back-off is built on the stored one read again here, and never waits less
+// than it, so a back-off the pass could not read at its start is doubled,
+// not restarted; with no answer here either, it is built on what the pass
+// read. Never throws: the outcome is the pass's report, and a store that
+// fails here must not lose it.
 async function persist(pass: Pass): Promise<void> {
   const { refusal } = pass;
   let next: BackoffState | null;
   if (refusal !== null) {
-    next = nextBackoff(pass.backoff, { kind: 'refused', now: pass.now(), code: refusal.code, retryAfterMs: refusal.retryAfterMs });
+    const again = await backoffAgain(pass);
+    const previous = again.unanswered ? pass.backoff : again.value;
+    const now = pass.now();
+    const refused = nextBackoff(previous, { kind: 'refused', now, code: refusal.code, retryAfterMs: refusal.retryAfterMs });
+    next = refused === null ? null : laterBackoff(refused, previous, now);
   } else if (pass.pagesRead > 0 && pass.backoff !== null) {
     next = null;
   } else {

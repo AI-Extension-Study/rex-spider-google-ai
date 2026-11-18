@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { BACKOFF_BASE_MS, BACKOFF_CAP_MS, BACKOFF_CODES, type BackoffState, LIMITED_BACKOFF_MS, backoffDecision, isBackoffState, nextBackoff } from '../../src/backoff.mts';
+import { BACKOFF_BASE_MS, BACKOFF_CAP_MS, BACKOFF_CODES, type BackoffState, LIMITED_BACKOFF_MS, backoffDecision, isBackoffState, laterBackoff, nextBackoff } from '../../src/backoff.mts';
 
 const NOW = Date.UTC(2026, 10, 20, 12);
 const MINUTE = 60_000;
@@ -93,6 +93,24 @@ test('a stored wait more than 6 hours ahead is ignored: no schedule writes one, 
   const state: BackoffState = { until: NOW + BACKOFF_CAP_MS + 1, failures: 3, code: 'rate-limited' };
   assert.deepEqual(backoffDecision(state, NOW), { skip: false });
   assert.deepEqual(backoffDecision({ ...state, until: NOW + BACKOFF_CAP_MS }, NOW), { skip: true, until: NOW + BACKOFF_CAP_MS, code: 'rate-limited' });
+});
+
+// What persist writes: the wait a refusal asks for, but never less than
+// what is already stored, so a stored back-off the pass could not read is
+// not shortened by its next refusal.
+test('the back-off written keeps the stored one\'s later until and larger failures', () => {
+  const next: BackoffState = { until: NOW + 10 * MINUTE, failures: 2, code: 'rate-limited' };
+  assert.deepEqual(laterBackoff(next, null, NOW), next);
+  assert.deepEqual(laterBackoff(next, { until: NOW + 5 * MINUTE, failures: 1, code: 'challenge' }, NOW), next);
+  assert.deepEqual(laterBackoff(next, { until: NOW + 59 * MINUTE, failures: 1, code: 'limited' }, NOW), { until: NOW + 59 * MINUTE, failures: 2, code: 'limited' });
+  assert.deepEqual(laterBackoff(next, { until: NOW + MINUTE, failures: 7, code: 'challenge' }, NOW), { until: NOW + 10 * MINUTE, failures: 7, code: 'rate-limited' });
+  assert.deepEqual(laterBackoff(next, { until: NOW + 10 * MINUTE, failures: 1, code: 'challenge' }, NOW), next);
+});
+
+test('a stored until more than 6 hours ahead is not kept: backoffDecision ignores it, and kept it would never be honoured', () => {
+  const next: BackoffState = { until: NOW + 10 * MINUTE, failures: 2, code: 'rate-limited' };
+  assert.deepEqual(laterBackoff(next, { until: NOW + BACKOFF_CAP_MS + 1, failures: 9, code: 'challenge' }, NOW), { ...next, failures: 9 });
+  assert.deepEqual(laterBackoff(next, { until: NOW + BACKOFF_CAP_MS, failures: 9, code: 'challenge' }, NOW), { until: NOW + BACKOFF_CAP_MS, failures: 9, code: 'challenge' });
 });
 
 test('a pass that read a list page without a refusal clears it', () => {

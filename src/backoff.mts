@@ -57,6 +57,22 @@ export function nextBackoff(previous: BackoffState | null, event: BackoffEvent):
   return { until: event.now + Math.min(Math.max(scheduledMs(failures, event.code), askedMs), BACKOFF_CAP_MS), failures, code: event.code };
 }
 
+// The state to write after a refusal: next, but never a shorter wait or a
+// lower count than the stored state, which the pass may not have read at its
+// start. A stored until more than BACKOFF_CAP_MS ahead is not kept:
+// backoffDecision ignores it, so kept it would never be honoured again. The
+// code is the one whose until is kept.
+export function laterBackoff(next: BackoffState, stored: BackoffState | null, now: number): BackoffState {
+  if (stored === null) {
+    return next;
+  }
+  const failures = Math.max(next.failures, stored.failures);
+  if (stored.until > next.until && stored.until - now <= BACKOFF_CAP_MS) {
+    return { until: stored.until, failures, code: stored.code };
+  }
+  return { ...next, failures };
+}
+
 export function backoffDecision(state: BackoffState | null, now: number): BackoffDecision {
   if (state === null || now >= state.until) {
     return { skip: false };
